@@ -1,0 +1,6 @@
+CompileFlags:
+  Add: 
+    - -I.pio/libdeps/esp32dev
+    - -I.pio/build/esp32dev
+    - -I.pio/packages/framework-arduinoespressif32/cores/esp32
+    - -I.pio/packages/framework-arduinoespressif32/libraries

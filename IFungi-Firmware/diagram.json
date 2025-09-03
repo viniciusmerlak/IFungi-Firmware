@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "author": "vinicius",
+  "editor": "manual",
+  "parts": [
+    { "type": "board-esp32-devkit-v1", "id": "esp", "top": -10, "left": -100, "attrs": {} },
+    { "type": "wokwi-serial-monitor", "id": "term1", "top": 100, "left": 0, "attrs": { "baud": "115200" } }
+  ],
+  "connections": [
+    [ "esp:TX0", "term1:RX" ],
+    [ "esp:RX0", "term1:TX" ]
+  ]
+}

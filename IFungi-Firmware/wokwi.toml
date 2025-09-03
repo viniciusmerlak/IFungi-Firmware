@@ -1,0 +1,7 @@
+[wokwi]
+board = "esp32-devkit-v1"
+firmware = ".pio/build/esp32doit-devkit-v1/firmware.elf"
+diagram = "diagram.json"
+
+[wokwi.options]
+baud = 115200
