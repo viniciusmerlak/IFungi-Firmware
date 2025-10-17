@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <Preferences.h>
 #include <nvs_flash.h>
+#include "esp_wifi.h"
 
 class WiFiConfigurator {
 private:
@@ -11,7 +12,8 @@ private:
     Preferences preferences;
     bool nvsInitialized = false;
     
-    bool initNVS(); // Declarado apenas UMA vez - na seção private
+    bool initNVS();
+    bool startAPFallback(const char* apSSID, const char* apPassword);
 
 public:
     int LED_BUILTIN = 2;
@@ -19,8 +21,8 @@ public:
     
     // Métodos públicos
     bool autoConnect(const char* apSSID, const char* apPassword = nullptr);
-    void startAP(const char* apSSID, const char* apPassword = nullptr);
-    bool connectToWiFi(const char* ssid, const char* password, bool persist);
+    bool startAP(const char* apSSID, const char* apPassword = nullptr);
+    bool connectToWiFi(const char* ssid, const char* password, unsigned long timeout);
     void reconnectOrFallbackToAP(const char* apSSID, const char* apPassword, 
                                 const char* storedSSID, const char* storedPassword);
     void stopAP();
@@ -30,6 +32,11 @@ public:
     void saveCredentials(const char* ssid, const char* password);
     bool loadCredentials(String &ssid, String &password);
     void clearCredentials();
+    
+    // Novas funções de reset do WiFi
+    void wifiHardReset();
+    void wifiSoftReset();
+    bool emergencyAPMode(const char* apSSID, const char* apPassword = nullptr);
 };
 
 #endif

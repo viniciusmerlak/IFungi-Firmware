@@ -35,18 +35,30 @@ const unsigned long STATUS_INTERVAL = 1000;
 
 void updateStatusLED() {
     static unsigned long lastBlink = 0;
+    static int blinkState = 0;
     
-    if (millis() - lastBlink < STATUS_INTERVAL) return;
-    lastBlink = millis();
-    
-    if (firebase.isAuthenticated() && wifiConfig.isConnected()) {
-        wifiConfig.piscaLED(true, 666666); // LED permanente
-    } else if (!wifiConfig.isConnected()) {
-        wifiConfig.piscaLED(true, 500); // Piscar rápido
-    } else if (!firebase.isAuthenticated()) {
-        wifiConfig.piscaLED(true, 777777); // Piscar duplo
+    if (WiFi.getMode() == WIFI_AP) {
+        // Modo AP: Piscar rápido
+        if (millis() - lastBlink > 500) {
+            digitalWrite(LED_BUILTIN, blinkState);
+            blinkState = !blinkState;
+            lastBlink = millis();
+        }
+    } else if (wifiConfig.isConnected()) {
+        if (firebase.isAuthenticated()) {
+            // Conectado e autenticado: LED permanente
+            digitalWrite(LED_BUILTIN, HIGH);
+        } else {
+            // Conectado mas não autenticado: Piscar lento
+            if (millis() - lastBlink > 1000) {
+                digitalWrite(LED_BUILTIN, blinkState);
+                blinkState = !blinkState;
+                lastBlink = millis();
+            }
+        }
     } else {
-        wifiConfig.piscaLED(true, 2000); // Piscar lento
+        // Não conectado: LED desligado
+        digitalWrite(LED_BUILTIN, LOW);
     }
 }
 void verificarHardware() {
@@ -83,7 +95,7 @@ void setupSensorsAndActuators() {
 void setupWiFiAndFirebase() {
     Serial.println("🌐 Iniciando configuração de rede...");
     
-    // Auto-conexão WiFi
+    // Auto-conexão WiFi com timeout
     bool wifiConnected = wifiConfig.autoConnect(AP_SSID, AP_PASSWORD);
     
     if (wifiConnected) {
@@ -107,11 +119,21 @@ void setupWiFiAndFirebase() {
                 Serial.println("❌ Falha na autenticação Firebase");
             }
         } else {
-            Serial.println("📝 Nenhuma credencial Firebase encontrada");
+            Serial.println("📝 Nenhuma credencial Firebase encontrada - aguardando configuração via web");
         }
     } else {
-        Serial.println("📡 Modo AP ativo. Conecte-se para configurar");
-        webServer.begin(false);
+        // Verifica se o AP foi iniciado com sucesso
+        if (WiFi.getMode() == WIFI_AP) {
+            Serial.println("📡 Modo AP ativo. Conecte-se para configurar");
+            Serial.println("📱 SSID: " + String(AP_SSID));
+            Serial.println("🌐 Acesse: " + wifiConfig.getLocalIP());
+            webServer.begin(false);
+        } else {
+            Serial.println("❌ Falha crítica: Não foi possível iniciar modo AP");
+            Serial.println("🔄 Reiniciando em 5 segundos...");
+            delay(5000);
+            ESP.restart();
+        }
     }
 }
 
