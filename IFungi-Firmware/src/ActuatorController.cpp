@@ -147,29 +147,26 @@ void ActuatorController::controlarAutomaticamente(float temp, float umid, int lu
         controlarPeltier(false, false); // Desligar
     }
     
-    // 2. Controle de umidade - Umidificador (Rele 3) com histerese
+    // 2. Controle de umidade - CORREÇÃO DA LÓGICA
     if (!waterLevel) {
-        Serial.println("[SEGURANÇA] Nível de água baixo, não operar umidificador");
+        Serial.println("[SEGURANÇA] Nível de água baixo, desligando umidificador");
         if (umidLigado) {
-            controlarRele(3, true); // Desliga o umidificador se estiver ligado
-            controlarRele(3, false); // Liga por pulso curto
+            controlarRele(3, false); // Desliga o umidificador
             umidLigado = false;
         }
-        // Não tenta ligar o umidificador se o nível de água estiver baixo
     } 
-    else
-    if (umid < (umidMin - HYSTERESIS_UMID) && !umidLigado && !waterLevel) {
-        Serial.printf("[ATUADOR] Umidade abaixo (%.1f < %.1f), ligando umidificador\n", umid, umidMin);
-        
-        controlarRele(3, true);
-        controlarRele(3, false); // Liga por pulso curto
-        umidLigado = true;
-    } 
-    else if (umid > (umidMax + HYSTERESIS_UMID) && umidLigado && !waterLevel) {
-        Serial.printf("[ATUADOR] Umidade acima (%.1f > %.1f), desligando umidificador\n", umid, umidMax);
-        controlarRele(3, true);
-        controlarRele(3, false); // Liga por pulso curto
-        umidLigado = false;
+    else {
+        // Só controla umidade se o nível de água estiver OK
+        if (umid < (umidMin - HYSTERESIS_UMID) && !umidLigado) {
+            Serial.printf("[ATUADOR] Umidade abaixo (%.1f < %.1f), ligando umidificador\n", umid, umidMin);
+            controlarRele(3, true); // Liga umidificador
+            umidLigado = true;
+        } 
+        else if (umid > (umidMax + HYSTERESIS_UMID) && umidLigado) {
+            Serial.printf("[ATUADOR] Umidade acima (%.1f > %.1f), desligando umidificador\n", umid, umidMax);
+            controlarRele(3, false); // Desliga umidificador
+            umidLigado = false;
+        }
     }
     
     // 3. Controle de luminosidade - LEDs
