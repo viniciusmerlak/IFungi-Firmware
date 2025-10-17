@@ -7,9 +7,11 @@
 #include "perdiavontadedeviver.h"
 #include "genQrCode.h"
 #include "ansi.h"
+
 ANSI ansi(&Serial);
 const char* AP_SSID = "IFungi-Config";
 const char* AP_PASSWORD = "config1234";
+
 String ifungiID;
 WiFiConfigurator wifiConfig;
 FirebaseHandler firebase;
@@ -18,157 +20,110 @@ GenQR qrcode;
 SensorController sensors;
 ActuatorController actuators;
 
-// Declarações de funções
-void memateRapido();
-void updateStatusLED();
-void setupSensorsAndActuators();
-void setupWiFiAndFirebase();
-void handleFirebaseOperations();
-void handleRegularIntervals();
+// Variáveis de timing
+unsigned long lastSensorRead = 0;
+unsigned long lastActuatorControl = 0;
+unsigned long lastFirebaseUpdate = 0;
+unsigned long lastHeartbeat = 0;
+unsigned long lastStatusUpdate = 0;
 
-void memateRapido() {
-    String email, password;
-    Serial.println("iniciando loop até loadFirebaseCredentials retornar true");
-    ansi.println("iniciando loop até loadFirebaseCredentials retornar true");
-    while((email, password) != ("") && firebase.authenticated == true && !firebase.loadFirebaseCredentials(email, password)) {
-        Serial.print(".");
-        webServer.begin(true);
-    }
-}
+const unsigned long SENSOR_INTERVAL = 2000;
+const unsigned long ACTUATOR_INTERVAL = 5000;
+const unsigned long FIREBASE_INTERVAL = 5000;
+const unsigned long HEARTBEAT_INTERVAL = 30000;
+const unsigned long STATUS_INTERVAL = 1000;
 
 void updateStatusLED() {
-    if(firebase.isAuthenticated() && wifiConfig.isConnected()) {
-        wifiConfig.piscaLED(true, 666666);
-        return;
-    } else if(!wifiConfig.isConnected()) {
-        wifiConfig.piscaLED(true, 666666);
-        return;
-    } else if(!firebase.isAuthenticated()) {
-        wifiConfig.piscaLED(true, 777777);
-        return;
+    static unsigned long lastBlink = 0;
+    
+    if (millis() - lastBlink < STATUS_INTERVAL) return;
+    lastBlink = millis();
+    
+    if (firebase.isAuthenticated() && wifiConfig.isConnected()) {
+        wifiConfig.piscaLED(true, 666666); // LED permanente
+    } else if (!wifiConfig.isConnected()) {
+        wifiConfig.piscaLED(true, 500); // Piscar rápido
+    } else if (!firebase.isAuthenticated()) {
+        wifiConfig.piscaLED(true, 777777); // Piscar duplo
     } else {
-        wifiConfig.piscaLED(true, 20000);
-        return;
+        wifiConfig.piscaLED(true, 2000); // Piscar lento
     }
 }
-
+void verificarHardware() {
+    Serial.println("🔍 Verificando hardware...");
+    
+    // Testar pinos dos sensores
+    pinMode(33, INPUT); // DHT22
+    pinMode(32, INPUT); // CCS811
+    pinMode(35, INPUT); // LDR
+    pinMode(34, INPUT); // MQ-7
+    pinMode(15, INPUT); // Nível água
+    
+    Serial.println("✅ Pinagem verificada");
+    
+    // Verificar tensão de alimentação
+    int vcc = analogRead(34); // Usar pino analogico para verificar tensão
+    Serial.printf("📊 Leitura de tensão: %d\n", vcc);
+}
 void setupSensorsAndActuators() {
+    Serial.println("🔧 Inicializando sensores e atuadores...");
+    
     sensors.begin();
     actuators.begin(4, 23, 14, 18, 19);
     
-    if(!actuators.carregarSetpointsNVS()) {
+    if (!actuators.carregarSetpointsNVS()) {
+        Serial.println("⚙️  Usando setpoints padrão");
         actuators.aplicarSetpoints(5000, 20.0, 30.0, 60.0, 80.0, 400, 400, 100);
     }
+    
+    actuators.setFirebaseHandler(&firebase);
+    Serial.println("✅ Sensores e atuadores inicializados");
 }
 
 void setupWiFiAndFirebase() {
-    String ssid, password;
-    if(wifiConfig.loadCredentials(ssid, password)) {
-        if(wifiConfig.connectToWiFi(ssid.c_str(), password.c_str(), true)) {
-            Serial.println("Conectado ao WiFi! Iniciando servidor...");
-            updateStatusLED();
-            
-            ifungiID = "IFUNGI-" + getMacAddress();
-            Serial.println("ID da Estufa: " + ifungiID);
-            qrcode.generateQRCode(ifungiID);
-            
-            webServer.begin(true);
-            
-            String email, firebasePassword;
-            updateStatusLED();
-            if(firebase.loadFirebaseCredentials(email, firebasePassword)) {
-                Serial.println("Credenciais do Firebase encontradas, autenticando...");
-                
-                if(firebase.authenticate(email, firebasePassword)) {
-                    Serial.println("Autenticação bem-sucedida!");
-                    updateStatusLED();
-                } else {
-                    Serial.println("Falha na autenticação com credenciais salvas.");
-                    updateStatusLED();
-                }
+    Serial.println("🌐 Iniciando configuração de rede...");
+    
+    // Auto-conexão WiFi
+    bool wifiConnected = wifiConfig.autoConnect(AP_SSID, AP_PASSWORD);
+    
+    if (wifiConnected) {
+        Serial.println("✅ WiFi conectado! Iniciando serviços...");
+        
+        // Gera ID da estufa
+        ifungiID = "IFUNGI-" + getMacAddress();
+        Serial.println("🏷️  ID da Estufa: " + ifungiID);
+        qrcode.generateQRCode(ifungiID);
+        
+        // Inicia servidor web
+        webServer.begin(true);
+        
+        // Tenta autenticar no Firebase
+        String email, firebasePassword;
+        if (firebase.loadFirebaseCredentials(email, firebasePassword)) {
+            Serial.println("🔥 Tentando autenticar no Firebase...");
+            if (firebase.authenticate(email, firebasePassword)) {
+                Serial.println("✅ Autenticação Firebase bem-sucedida!");
             } else {
-                Serial.println("Nenhuma credencial do Firebase encontrada.");
-                updateStatusLED();
+                Serial.println("❌ Falha na autenticação Firebase");
             }
         } else {
-            wifiConfig.startAP(AP_SSID, AP_PASSWORD);
-            webServer.begin(false);
-            updateStatusLED();
+            Serial.println("📝 Nenhuma credencial Firebase encontrada");
         }
-        updateStatusLED();
     } else {
-        wifiConfig.startAP(AP_SSID, AP_PASSWORD);
+        Serial.println("📡 Modo AP ativo. Conecte-se para configurar");
         webServer.begin(false);
-        updateStatusLED();
-    }
-    actuators.setFirebaseHandler(&firebase);
-    updateStatusLED();
-}
-
-void handleFirebaseOperations() {
-    static unsigned long lastFirebaseUpdate = 0;
-    static unsigned long lastTokenCheck = 0;
-    static unsigned long lastAuthAttempt = 0;
-    
-    const unsigned long FIREBASE_INTERVAL = 5000;
-    const unsigned long TOKEN_CHECK_INTERVAL = 300000;
-    const unsigned long AUTH_RETRY_INTERVAL = 30000;
-
-    if(firebase.isAuthenticated()) {
-        if(millis() - lastTokenCheck > TOKEN_CHECK_INTERVAL) {
-            firebase.refreshToken();
-            lastTokenCheck = millis();
-        }
-
-        if(millis() - lastFirebaseUpdate > FIREBASE_INTERVAL) {
-            if(Firebase.ready()) {
-                firebase.enviarDadosSensores(
-                    sensors.getTemperature(),
-                    sensors.getHumidity(),
-                    sensors.getCO2(),
-                    sensors.getCO(),
-                    sensors.getLight(),
-                    sensors.getTVOCs(),
-                    sensors.getWaterLevel()
-                );
-                
-                firebase.verificarComandos(actuators);
-                firebase.RecebeSetpoint(actuators);
-                
-                lastFirebaseUpdate = millis();
-            } else {
-                Serial.println("Token do Firebase inválido, tentando renovar...");
-                firebase.refreshToken();
-            }
-        }
-    } else {
-        if(millis() - lastAuthAttempt > AUTH_RETRY_INTERVAL) {
-            String email, password;
-            if(firebase.loadFirebaseCredentials(email, password)) {
-                if(firebase.authenticate(email, password)) {
-                    firebase.verificarEstufa();
-                }
-            }
-            lastAuthAttempt = millis();
-        }
     }
 }
 
-void handleRegularIntervals() {
-    static unsigned long lastSensorRead = 0;
-    static unsigned long lastActuatorControl = 0;
-    static unsigned long lastHeartbeat = 0;
-    
-    const unsigned long SENSOR_READ_INTERVAL = 2000;
-    const unsigned long ACTUATOR_CONTROL_INTERVAL = 5000;
-    const unsigned long HEARTBEAT_INTERVAL = 15000;
-
-    if (millis() - lastSensorRead > SENSOR_READ_INTERVAL) {
+void handleSensors() {
+    if (millis() - lastSensorRead > SENSOR_INTERVAL) {
         sensors.update();
         lastSensorRead = millis();
     }
-    
-    if (millis() - lastActuatorControl > ACTUATOR_CONTROL_INTERVAL) {
+}
+
+void handleActuators() {
+    if (millis() - lastActuatorControl > ACTUATOR_INTERVAL) {
         actuators.controlarAutomaticamente(
             sensors.getTemperature(),
             sensors.getHumidity(),
@@ -180,43 +135,64 @@ void handleRegularIntervals() {
         );
         lastActuatorControl = millis();
     }
+}
+
+void handleFirebase() {
+    if (!firebase.isAuthenticated() || !wifiConfig.isConnected()) {
+        return;
+    }
+    
+    if (millis() - lastFirebaseUpdate > FIREBASE_INTERVAL) {
+        firebase.enviarDadosSensores(
+            sensors.getTemperature(),
+            sensors.getHumidity(),
+            sensors.getCO2(),
+            sensors.getCO(),
+            sensors.getLight(),
+            sensors.getTVOCs(),
+            sensors.getWaterLevel()
+        );
+        
+        firebase.verificarComandos(actuators);
+        firebase.RecebeSetpoint(actuators);
+        
+        lastFirebaseUpdate = millis();
+    }
     
     if (millis() - lastHeartbeat > HEARTBEAT_INTERVAL) {
-        if (firebase.isAuthenticated()) {
-            firebase.enviarHeartbeat();
-        }
+        firebase.enviarHeartbeat();
         lastHeartbeat = millis();
     }
 }
 
 void setup() {
     Serial.begin(115200);
-    ansi.foreground(ANSI::white | ANSI::bright);
-    ansi.background(ANSI::red);
-    ansi.print(" Red ");
-    ansi.background(ANSI::green);
-    ansi.print(" Green ");
-    ansi.background(ANSI::magenta);
-    ansi.println(" Purple ");
-    Serial.println();
-
-    ansi.normal();
-    ansi.print("Doing nothing... ");
-    ansi.foreground(ANSI::yellow | ANSI::bright);
-    ansi.print("[ ]");
-    ansi.cursorBack(2);
     delay(1000);
-    firebase.setWiFiConfigurator(&wifiConfig);
     
+    Serial.println("\n\n🚀 Iniciando IFungi System...");
+    
+    // Adicionar esta linha
+    verificarHardware();
+    
+    // Configuração inicial
     setupSensorsAndActuators();
     setupWiFiAndFirebase();
+    
+    Serial.println("✅ Sistema inicializado e pronto!");
 }
 
 void loop() {
-    updateStatusLED();
+    // Processa cliente web
     webServer.handleClient();
-    handleRegularIntervals();
-    handleFirebaseOperations();
     
+    // Atualiza status do LED
+    updateStatusLED();
+    
+    // Executa tarefas periódicas
+    handleSensors();
+    handleActuators();
+    handleFirebase();
+    
+    // Pequeno delay para estabilidade
     delay(10);
 }

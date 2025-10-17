@@ -224,8 +224,10 @@ FirebaseHandler::~FirebaseHandler() {
 }
 
 bool FirebaseHandler::enviarDadosParaHistorico(float temp, float umid, int co2, int co, int lux, int tvocs) {
-    // Implementação existente, mas retornando true/false conforme sucesso
     if (!authenticated || !Firebase.ready()) {
+        // Salva localmente se não conseguir enviar
+        unsigned long timestamp = getCurrentTimestamp();
+        salvarDadosLocalmente(temp, umid, co2, co, lux, tvocs, timestamp);
         return false;
     }
 
@@ -247,6 +249,9 @@ bool FirebaseHandler::enviarDadosParaHistorico(float temp, float umid, int co2, 
         return true;
     } else {
         Serial.println("Falha ao salvar histórico: " + fbdo.errorReason());
+        // Fallback: salvar localmente
+        unsigned long timestamp = getCurrentTimestamp();
+        salvarDadosLocalmente(temp, umid, co2, co, lux, tvocs, timestamp);
         return false;
     }
 }
