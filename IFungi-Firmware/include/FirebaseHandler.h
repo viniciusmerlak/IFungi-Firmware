@@ -5,7 +5,7 @@
 #include <FirebaseESP32.h>
 #include <nvs_flash.h>
 #include "ActuatorController.h"
-#include "WiFiConfigurator.h"
+
 
 #include <Preferences.h>
 #include <NTPClient.h>
@@ -40,7 +40,6 @@ public:
     bool estufaExiste(const String& estufaId);
     void verificarEstufa();
     void verificarPermissoes();
-    void setWiFiConfigurator(WiFiConfigurator* wifiConfig);
     void handleTokenError();
     void enviarDadosSensores(float temp, float umid, int co2, int co, int lux, int tvocs, bool waterLevel);
     void verificarComandos(ActuatorController& actuators);
@@ -66,9 +65,10 @@ public:
     bool enviarDadosParaHistorico(float temp, float umid, int co2, int co, int lux, int tvocs);
 private:
     String getMacAddress();
-    WiFiConfigurator* wifiConfig = nullptr;
+
     FirebaseAuth auth;
     FirebaseConfig config;
+    //quem mexer aqui vai morrer antes do natal
     const String FIREBASE_API_KEY = "AIzaSyDkPzzLHykaH16FsJpZYwaNkdTuOOmfnGE";
     const String DATABASE_URL = "pfi-ifungi-default-rtdb.firebaseio.com";
 

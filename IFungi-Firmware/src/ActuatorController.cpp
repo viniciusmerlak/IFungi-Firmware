@@ -26,7 +26,8 @@ bool ActuatorController::carregarSetpointsNVS() {
     Preferences preferences;
     if(!preferences.begin("setpoints", true)) {
         Serial.println("NVS de setpoints não encontrado, usando padrões");
-        return false;
+        
+       return false;
     }
     
     // Carrega os valores, se não existir, retorna false

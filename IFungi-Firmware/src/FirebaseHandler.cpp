@@ -12,9 +12,6 @@ String FirebaseHandler::getMacAddress() {
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     return String(macStr);
 }
-void FirebaseHandler::setWiFiConfigurator(WiFiConfigurator* wifiConfig) {
-    this->wifiConfig = wifiConfig;
-}
 void FirebaseHandler::begin(const String &apiKey, const String &email, const String &password, const String &databaseUrl) {
   
     Serial.println("Begin Recebendo email:" + email);
@@ -549,6 +546,7 @@ void FirebaseHandler::handleTokenError() {
 }
 
 void FirebaseHandler::verificarComandos(ActuatorController& actuators) {
+    return;  //essa função estou em duvida se é necessária, nao mexer por enquanto
     if (!authenticated) return;
 
     String path = FirebaseHandler::getEstufasPath() + estufaId + "/atuadores"; // Modifique esta linha
@@ -763,8 +761,6 @@ bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
     Preferences preferences;
     if(!preferences.begin("firebase-creds", true)) {
         Serial.println("[ERRO] Falha ao abrir preferences");
-        nvs_flash_erase(); // erase the NVS partition and...
-        nvs_flash_init(); // initialize the NVS partition.
         return false;
     }
     
@@ -773,10 +769,11 @@ bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
     preferences.end();
     
     if(email.isEmpty() || password.isEmpty()) {
-        Serial.println("Nenhuma credencial encontrada");
+        Serial.println("Nenhuma credencial Firebase encontrada");
         return false;
     }
-    begin(FIREBASE_API_KEY, email, password, DATABASE_URL);
+    
+    Serial.println("Credenciais Firebase carregadas do NVS");
     return true;
 }
 
