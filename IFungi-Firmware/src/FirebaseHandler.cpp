@@ -221,8 +221,11 @@ FirebaseHandler::~FirebaseHandler() {
 }
 
 bool FirebaseHandler::enviarDadosParaHistorico(float temp, float umid, int co2, int co, int lux, int tvocs) {
+    // Verifica se está autenticado e pronto
     if (!authenticated || !Firebase.ready()) {
-        // Salva localmente se não conseguir enviar
+        Serial.println("📴 Firebase não disponível para enviar histórico");
+        
+        // Salva localmente como fallback
         unsigned long timestamp = getCurrentTimestamp();
         salvarDadosLocalmente(temp, umid, co2, co, lux, tvocs, timestamp);
         return false;
@@ -242,10 +245,14 @@ bool FirebaseHandler::enviarDadosParaHistorico(float temp, float umid, int co2, 
     json.set("dataHora", getFormattedDateTime());
     
     if (Firebase.setJSON(fbdo, path.c_str(), json)) {
-        Serial.println("Dados salvos no histórico com sucesso!");
+        Serial.println("✅ Dados salvos no histórico com sucesso!");
+        
+        // Limita o histórico se necessário
+        limitarHistorico();
         return true;
     } else {
-        Serial.println("Falha ao salvar histórico: " + fbdo.errorReason());
+        Serial.println("❌ Falha ao salvar histórico: " + fbdo.errorReason());
+        
         // Fallback: salvar localmente
         unsigned long timestamp = getCurrentTimestamp();
         salvarDadosLocalmente(temp, umid, co2, co, lux, tvocs, timestamp);

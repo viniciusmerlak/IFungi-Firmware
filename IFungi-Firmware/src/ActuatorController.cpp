@@ -55,7 +55,7 @@ const float HYSTERESIS_TEMP = 0.5f;
 const float HYSTERESIS_UMID = 2.0f;
 
 void ActuatorController::begin(uint8_t pinLED, uint8_t pinRele1, uint8_t pinRele2, 
-                             uint8_t pinRele3, uint8_t pinRele4) {
+                             uint8_t pinRele3, uint8_t pinRele4, uint8_t servoPin) {
     Serial.println("Inicializando ActuatorController...");
     
     // Configurar pinos
@@ -64,7 +64,9 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRele1, uint8_t pinRele
     _pinRele2 = pinRele2;
     _pinRele3 = pinRele3;
     _pinRele4 = pinRele4;
-
+    servoPin = servoPin;
+    meuServo.attach(servoPin);
+    meuServo.write(fechado);
     pinMode(_pinLED, OUTPUT);
     pinMode(_pinRele1, OUTPUT);
     pinMode(_pinRele2, OUTPUT);
@@ -186,8 +188,10 @@ void ActuatorController::controlarAutomaticamente(float temp, float umid, int lu
     if (co > coSetpoint || co2 > co2Setpoint || tvocs > tvocsSetpoint) {
         Serial.printf("[ATUADOR] Gases acima do limite (CO: %d, CO2: %d, TVOCs: %d), ligando exaustor\n", 
                      co, co2, tvocs);
+        meuServo.write(aberto);
         controlarRele(4, true); // Liga exaustor
     } else {
+        meuServo.write(fechado);
         controlarRele(4, false); // Desliga exaustor
     }
 }

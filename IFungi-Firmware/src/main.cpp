@@ -19,46 +19,91 @@ unsigned long lastSensorRead = 0;
 unsigned long lastActuatorControl = 0;
 unsigned long lastFirebaseUpdate = 0;
 unsigned long lastHeartbeat = 0;
+unsigned long lastHistoricoUpdate = 0;
+unsigned long lastLocalSave = 0;
 
 const unsigned long SENSOR_INTERVAL = 2000;
 const unsigned long ACTUATOR_INTERVAL = 5000;
 const unsigned long FIREBASE_INTERVAL = 5000;
 const unsigned long HEARTBEAT_INTERVAL = 30000;
+const unsigned long HISTORICO_INTERVAL = 300000; // 5 minutos
+const unsigned long LOCAL_SAVE_INTERVAL = 60000; // 1 minuto
 
-void updateStatusLED() {
-    static unsigned long lastBlink = 0;
-    static int blinkState = 0;
+// Task handle para o LED
+TaskHandle_t ledTaskHandle = NULL;
+
+// Função da task do LED
+void ledTask(void * parameter) {
+    unsigned long lastBlink = 0;
+    int blinkState = 0;
+    int blinkPattern = 0; // 0=desligado, 1=rapido, 2=lento, 3=permanente
+    unsigned long blinkInterval = 1000;
     
-    if (WiFi.getMode() == WIFI_AP) {
-        // Modo AP: Piscar rápido
-        if (millis() - lastBlink > 500) {
-            digitalWrite(LED_BUILTIN, blinkState);
-            blinkState = !blinkState;
-            lastBlink = millis();
-        }
-    } else if (WiFi.status() == WL_CONNECTED) {
-        if (firebase.isAuthenticated()) {
-            // Conectado e autenticado: LED permanente
-            digitalWrite(LED_BUILTIN, HIGH);
-        } else {
-            // Conectado mas não autenticado: Piscar lento
-            if (millis() - lastBlink > 1000) {
-                digitalWrite(LED_BUILTIN, blinkState);
-                blinkState = !blinkState;
-                lastBlink = millis();
+    for(;;) {
+        // Atualiza padrão baseado no estado da conexão
+        if (!WiFi.isConnected()) {
+            blinkPattern = 0; // Desligado
+        } else if (WiFi.getMode() == WIFI_AP) {
+            blinkPattern = 1; // Piscar rápido (modo AP)
+            blinkInterval = 500;
+        } else if (WiFi.status() == WL_CONNECTED) {
+            if (firebase.isAuthenticated()) {
+                blinkPattern = 3; // Permanente (conectado e autenticado)
+            } else {
+                blinkPattern = 2; // Piscar lento (conectado mas não autenticado)
+                blinkInterval = 1000;
             }
+        } else {
+            blinkPattern = 0; // Desligado
         }
-    } else {
-        // Não conectado: LED desligado
-        digitalWrite(LED_BUILTIN, LOW);
+        
+        // Executa o padrão de piscada
+        switch (blinkPattern) {
+            case 0: // Desligado
+                digitalWrite(LED_BUILTIN, LOW);
+                break;
+                
+            case 1: // Piscar rápido (modo AP)
+            case 2: // Piscar lento (não autenticado)
+                if (millis() - lastBlink > blinkInterval) {
+                    digitalWrite(LED_BUILTIN, blinkState);
+                    blinkState = !blinkState;
+                    lastBlink = millis();
+                }
+                break;
+                
+            case 3: // Permanente (conectado e autenticado)
+                digitalWrite(LED_BUILTIN, HIGH);
+                break;
+        }
+        
+        vTaskDelay(50 / portTICK_PERIOD_MS); // Pequeno delay para não sobrecarregar
     }
+}
+
+// Inicializa a task do LED
+void setupLEDTask() {
+    pinMode(LED_BUILTIN, OUTPUT);
+    digitalWrite(LED_BUILTIN, LOW);
+    
+    xTaskCreatePinnedToCore(
+        ledTask,           // Função da task
+        "LED_Task",        // Nome da task
+        2048,              // Stack size
+        NULL,              // Parâmetros
+        1,                 // Prioridade (baixa)
+        &ledTaskHandle,    // Task handle
+        0                  // Core (0 ou 1)
+    );
+    
+    Serial.println("✅ Task do LED inicializada no core " + String(xPortGetCoreID()));
 }
 
 void setupSensorsAndActuators() {
     Serial.println("🔧 Inicializando sensores e atuadores...");
     
     sensors.begin();
-    actuators.begin(4, 23, 14, 18, 19);
+    actuators.begin(4, 23, 14, 18, 19, 13);
     
     if (!actuators.carregarSetpointsNVS()) {
         Serial.println("⚙️  Usando setpoints padrão");
@@ -184,6 +229,9 @@ void setupWiFiAndFirebase() {
             
             // Verifica se a estufa existe/cria se necessário
             firebase.verificarEstufa();
+            
+            // Tenta enviar dados locais pendentes
+            firebase.enviarDadosLocais();
             break;
         } else {
             Serial.printf("❌ Falha na autenticação Firebase (tentativa %d/%d)\n", 
@@ -249,7 +297,48 @@ void setupWiFiAndFirebase() {
     }
 }
 
-// Função auxiliar para verificar conexão periódica (chamar no loop se necessário)
+// Função para salvar dados localmente quando offline
+void salvarDadosLocalmente() {
+    if (WiFi.status() != WL_CONNECTED || !firebase.isAuthenticated()) {
+        // Salva dados localmente
+        unsigned long timestamp = firebase.getCurrentTimestamp();
+        firebase.salvarDadosLocalmente(
+            sensors.getTemperature(),
+            sensors.getHumidity(),
+            sensors.getCO2(),
+            sensors.getCO(),
+            sensors.getLight(),
+            sensors.getTVOCs(),
+            timestamp
+        );
+        Serial.println("💾 Dados salvos localmente (modo offline)");
+    }
+}
+
+// Função para enviar dados ao histórico
+void enviarDadosParaHistorico() {
+    if (WiFi.status() == WL_CONNECTED && firebase.isAuthenticated()) {
+        bool enviado = firebase.enviarDadosParaHistorico(
+            sensors.getTemperature(),
+            sensors.getHumidity(),
+            sensors.getCO2(),
+            sensors.getCO(),
+            sensors.getLight(),
+            sensors.getTVOCs()
+        );
+        
+        if (enviado) {
+            Serial.println("📊 Dados enviados para histórico Firebase");
+        } else {
+            Serial.println("❌ Falha ao enviar dados para histórico");
+        }
+    } else {
+        Serial.println("📴 Modo offline - dados serão salvos localmente");
+        salvarDadosLocalmente();
+    }
+}
+
+// Função auxiliar para verificar conexão periódica
 void verifyConnectionStatus() {
     static unsigned long lastCheck = 0;
     const unsigned long CHECK_INTERVAL = 30000; // 30 segundos
@@ -269,6 +358,10 @@ void verifyConnectionStatus() {
             
             if (WiFi.status() == WL_CONNECTED) {
                 Serial.println("✅ WiFi reconectado");
+                // Tenta enviar dados locais pendentes após reconexão
+                if (firebase.isAuthenticated()) {
+                    firebase.enviarDadosLocais();
+                }
             } else {
                 Serial.println("❌ Falha na reconexão WiFi");
             }
@@ -331,17 +424,37 @@ void handleFirebase() {
     }
 }
 
+// Nova função para gerenciar histórico e dados locais
+void handleHistoricoEDadosLocais() {
+    // Envia dados para histórico a cada intervalo definido
+    if (millis() - lastHistoricoUpdate > HISTORICO_INTERVAL) {
+        enviarDadosParaHistorico();
+        lastHistoricoUpdate = millis();
+    }
+    
+    // Salva dados localmente periodicamente (backup)
+    if (millis() - lastLocalSave > LOCAL_SAVE_INTERVAL) {
+        if (WiFi.status() != WL_CONNECTED || !firebase.isAuthenticated()) {
+            salvarDadosLocalmente();
+        }
+        lastLocalSave = millis();
+    }
+}
+
 void setup() {
     Serial.begin(115200);
     delay(1000);
     
     Serial.println("\n\n🚀 Iniciando IFungi System...");
     
+    // Inicializa a task do LED primeiro
+    setupLEDTask();
+    
     // Configuração inicial
     setupSensorsAndActuators();
     setupWiFiAndFirebase();
 
-     // Gera ID da estufa
+    // Gera ID da estufa
     ifungiID = "IFUNGI-" + getMacAddress();
     Serial.println("🏷️  ID da Estufa: " + ifungiID);
     qrcode.generateQRCode(ifungiID);
@@ -350,14 +463,15 @@ void setup() {
 }
 
 void loop() {
-    // Atualiza status do LED
-    updateStatusLED();
+    // O LED agora é controlado pela task separada - REMOVA a chamada updateStatusLED()
     
     // Executa tarefas periódicas
     handleSensors();
     handleActuators();
     handleFirebase();
+    handleHistoricoEDadosLocais();
     verifyConnectionStatus();
+    
     // Pequeno delay para estabilidade
     delay(10);
 }

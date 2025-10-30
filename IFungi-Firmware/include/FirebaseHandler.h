@@ -63,6 +63,9 @@ public:
     void enviarHeartbeat();
     unsigned long getLastHeartbeatTime() const;
     bool enviarDadosParaHistorico(float temp, float umid, int co2, int co, int lux, int tvocs);
+    
+
+    bool isFirebaseReady() const { return Firebase.ready(); }
 private:
     String getMacAddress();
 

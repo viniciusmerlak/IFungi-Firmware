@@ -3,12 +3,15 @@
 
 #include <Arduino.h>
 #include "FirebaseHandler.h"
+#include <ESP32Servo.h>
 
 class FirebaseHandler;
 
 class ActuatorController {
 public:
-    void begin(uint8_t pinLED, uint8_t pinRele1, uint8_t pinRele2, uint8_t pinRele3, uint8_t pinRele4);
+    int fechado = 160;
+    int aberto = 45;
+    void begin(uint8_t pinLED, uint8_t pinRele1, uint8_t pinRele2, uint8_t pinRele3, uint8_t pinRele4, uint8_t servoPin);
     void setFirebaseHandler(FirebaseHandler* handler);
     void aplicarSetpoints(int lux, float tMin, float tMax, float uMin, float uMax, int coSp, int co2Sp, int tvocsSp);
     void controlarLEDs(bool ligado, int watts);
@@ -25,7 +28,8 @@ public:
     };
     
 private:
-    uint8_t _pinLED, _pinRele1, _pinRele2, _pinRele3, _pinRele4;
+    uint8_t _pinLED, _pinRele1, _pinRele2, _pinRele3, _pinRele4, _servoPin; // Adicione _servoPin aqui
+    Servo meuServo; // Mova a declaração do servo para dentro da classe
     FirebaseHandler* firebaseHandler = nullptr;
     
     // Variáveis de estado
@@ -42,7 +46,7 @@ private:
     float umidMax = 80.0;
     int coSetpoint = 400;    // ppm
     int co2Setpoint = 400;  // ppm
-    int tvocsSetpoint = 100; // ppb - Add this line
+    int tvocsSetpoint = 100; // ppb
     
     // Novas variáveis para controle de estado
     ModoPeltier modoPeltierAtual = DESLIGADO;
