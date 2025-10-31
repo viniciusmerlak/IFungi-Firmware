@@ -411,6 +411,15 @@ void handleFirebase() {
             sensors.getTVOCs(),
             sensors.getWaterLevel()
         );
+        firebase.atualizarEstadoAtuadores(
+            actuators.getReleState(1),
+            actuators.getReleState(2),
+            actuators.getReleState(3),
+            actuators.getReleState(4),
+            actuators.areLEDsOn(),
+            actuators.getLEDsWatts(),
+            actuators.isUmidificadorOn()
+        );
         
         firebase.verificarComandos(actuators);
         firebase.RecebeSetpoint(actuators);

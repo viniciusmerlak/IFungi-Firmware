@@ -64,7 +64,7 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRele1, uint8_t pinRele
     _pinRele2 = pinRele2;
     _pinRele3 = pinRele3;
     _pinRele4 = pinRele4;
-    servoPin = servoPin;
+    _servoPin = servoPin;
     meuServo.attach(servoPin);
     meuServo.write(fechado);
     pinMode(_pinLED, OUTPUT);
@@ -306,4 +306,23 @@ bool ActuatorController::AquecerPastilha(bool ligar) {
     // Função mantida para compatibilidade
     controlarPeltier(false, ligar);
     return true;
+}
+bool ActuatorController::areLEDsOn() const {
+    return intensidadeLEDAtual > 0;
+}
+
+// isUmidificadorOn() removed from .cpp to avoid redefinition (keep single declaration/definition in the header)
+
+int ActuatorController::getLEDsWatts() const {
+    return intensidadeLEDAtual;
+}
+
+int ActuatorController::getReleState(uint8_t num) const {
+    switch(num) {
+        case 1: return rele1Estado;
+        case 2: return rele2Estado;
+        case 3: return rele3Estado;
+        case 4: return rele4Estado;
+        default: return -1; // Estado inválido
+    }
 }

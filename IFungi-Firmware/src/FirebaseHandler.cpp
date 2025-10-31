@@ -120,6 +120,7 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
             
             // Verifica se a estufa existe imediatamente após autenticar
             verificarEstufa();
+            permissaoUser(userUID, estufaId);
             return true;
         }
         delay(500);

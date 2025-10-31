@@ -128,7 +128,7 @@ void SensorController::update() {
         }
 
         // Leitura do nível de água
-        waterLevel = (touchRead(WATERLEVEL_PIN) <= 35);
+        waterLevel = (analogRead(WATERLEVEL_PIN) <= 35);
 
         // Log a cada 10 ciclos (20 segundos)
         if(readCount % 10 == 0) {

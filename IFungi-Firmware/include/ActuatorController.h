@@ -26,7 +26,10 @@ public:
         AQUECENDO,
         RESFRIANDO
     };
-    
+    bool isUmidificadorOn() const { return umidLigado; }
+    bool areLEDsOn() const;
+    int getLEDsWatts() const;
+    int getReleState(uint8_t num) const;
 private:
     uint8_t _pinLED, _pinRele1, _pinRele2, _pinRele3, _pinRele4, _servoPin; // Adicione _servoPin aqui
     Servo meuServo; // Mova a declaração do servo para dentro da classe
