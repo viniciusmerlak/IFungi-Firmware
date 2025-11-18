@@ -6,65 +6,6 @@
 
 DHT dht(DHTPIN, DHTTYPE);
 
-void SensorController::calibrateWaterSensor() {
-    Serial.println("💧 Calibrating water level sensor...");
-    Serial.println("⚠️  Make sure sensor is DRY for calibration");
-    
-    // Take multiple readings for dry calibration
-    int dryReadings = 0;
-    for(int i = 0; i < 10; i++) {
-        dryReadings += analogRead(WATERLEVEL_PIN);
-        delay(100);
-    }
-    emptyValue = dryReadings / 10;
-    
-    Serial.println("💧 Now submerge sensor in water for wet calibration...");
-    Serial.println("⏳ Waiting 5 seconds for submersion...");
-    delay(5000);
-    
-    // Take multiple readings for wet calibration
-    int wetReadings = 0;
-    for(int i = 0; i < 10; i++) {
-        wetReadings += analogRead(WATERLEVEL_PIN);
-        delay(100);
-    }
-    fullValue = wetReadings / 10;
-    
-    // Calculate threshold (30% of range for safety margin)
-    waterLevelThreshold = fullValue + (emptyValue - fullValue) * 0.3;
-    
-    waterLevelCalibrated = true;
-    
-    Serial.printf("💧 Water sensor calibrated - Dry: %d, Wet: %d, Threshold: %d\n", 
-                  emptyValue, fullValue, waterLevelThreshold);
-    Serial.printf("💧 Water detected when reading < %d\n", waterLevelThreshold);
-}
-
-bool SensorController::readWaterLevel() {
-    int sensorValue = analogRead(WATERLEVEL_PIN);
-    
-    // If not calibrated, use default logic with debugging
-    if (!waterLevelCalibrated) {
-        bool detected = (sensorValue <= 2000); // Conservative default threshold
-        Serial.printf("💧 Raw: %d, Threshold: 2000, Water: %s\n", 
-                     sensorValue, detected ? "YES" : "NO");
-        return detected;
-    }
-    
-    // Use calibrated threshold
-    bool detected = (sensorValue <= waterLevelThreshold);
-    
-    // Debug output every 10 readings
-    static int readCount = 0;
-    if (readCount % 10 == 0) {
-        Serial.printf("💧 Raw: %d, Threshold: %d, Water: %s\n", 
-                     sensorValue, waterLevelThreshold, detected ? "YES" : "NO");
-    }
-    readCount++;
-    
-    return detected;
-}
-
 void SensorController::begin() {
     Serial.println("Initializing sensor DHT22");
     dht.begin();
@@ -130,11 +71,9 @@ void SensorController::begin() {
         Serial.println("WARNING: CCS811 not initialized. Continuing without CO2/TVOC sensor.");
     }
 
-    // Water level sensor initialization
+    // Water level sensor initialization - SIMPLIFIED
     Serial.println("Initializing water level sensor");
-    
-    // Auto-calibration on first run
-    calibrateWaterSensor();
+    Serial.println("💧 Using fixed threshold: 2000");
 
     // Initialize variables
     lastUpdate = 0;
@@ -183,8 +122,15 @@ void SensorController::update() {
             }
         }
 
-        // Water level reading with improved logic
-        waterLevel = readWaterLevel();
+        // SIMPLIFIED water level reading - no calibration
+        int waterSensorValue = analogRead(WATERLEVEL_PIN);
+        waterLevel = (waterSensorValue <= WATER_LEVEL_THRESHOLD);
+        
+        // Debug water sensor occasionally
+        if(readCount % 5 == 0) {
+            Serial.printf("💧 Water sensor - Raw: %d, Threshold: %d, Water: %s\n", 
+                         waterSensorValue, WATER_LEVEL_THRESHOLD, waterLevel ? "LOW" : "OK");
+        }
 
         // Log every 10 cycles (20 seconds)
         if(readCount % 10 == 0) {

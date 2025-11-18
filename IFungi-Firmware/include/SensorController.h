@@ -37,14 +37,8 @@ private:
     int light;
     bool waterLevel;
     
-    // Water level calibration
-    int waterLevelThreshold = 2000; // Default threshold - will be calibrated
-    bool waterLevelCalibrated = false;
-    int emptyValue = 4095; // Value when sensor is dry (max ADC)
-    int fullValue = 0;     // Value when sensor is submerged (min ADC)
-    
-    void calibrateWaterSensor();
-    bool readWaterLevel();
+    // Water level threshold - fixed value for testing
+    const int WATER_LEVEL_THRESHOLD = 2000; // Conservative threshold
 };
 
 #endif
