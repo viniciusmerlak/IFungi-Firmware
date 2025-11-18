@@ -1,71 +1,75 @@
-#ifndef ACTUATORCONTROLLER_H
-#define ACTUATORCONTROLLER_H
+#ifndef ACTUATOR_CONTROLLER_H
+#define ACTUATOR_CONTROLLER_H
 
 #include <Arduino.h>
-#include "FirebaseHandler.h"
+#include "GreenhouseSystem.h"
 #include <ESP32Servo.h>
 
 class FirebaseHandler;
 
 class ActuatorController {
 public:
-    int fechado = 160;
-    int aberto = 45;
-    void begin(uint8_t pinLED, uint8_t pinRele1, uint8_t pinRele2, uint8_t pinRele3, uint8_t pinRele4, uint8_t servoPin);
+    int closedPosition = 160;
+    int openPosition = 45;
+    
+    void begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRelay2, uint8_t pinRelay3, uint8_t pinRelay4, uint8_t servoPin);
     void setFirebaseHandler(FirebaseHandler* handler);
-    void aplicarSetpoints(int lux, float tMin, float tMax, float uMin, float uMax, int coSp, int co2Sp, int tvocsSp);
-    void controlarLEDs(bool ligado, int watts);
-    void controlarRele(uint8_t num, bool estado);
-    void controlarPeltier(bool resfriar, bool ligar);
-    void controlarAutomaticamente(float temp, float umid, int luz, int co, int co2, int tvocs, bool waterLevel);
-    bool AquecerPastilha(bool ligar);
-    void salvarSetpointsNVS();
-    bool carregarSetpointsNVS();
-    enum ModoPeltier {
-        DESLIGADO,
-        AQUECENDO,
-        RESFRIANDO
+    void applySetpoints(int lux, float tempMin, float tempMax, float humidityMin, float humidityMax, int coSetpoint, int co2Setpoint, int tvocsSetpoint);
+    void controlLEDs(bool on, int intensity);
+    void controlRelay(uint8_t relayNumber, bool state);
+    void controlPeltier(bool cooling, bool on);
+    void controlAutomatically(float temp, float humidity, int light, int co, int co2, int tvocs, bool waterLevel);
+    bool heatPeltier(bool on);
+    void saveSetpointsNVS();
+    bool loadSetpointsNVS();
+    
+    enum PeltierMode {
+        OFF,
+        HEATING,
+        COOLING
     };
-    bool isUmidificadorOn() const { return umidLigado; }
+    
+    bool isHumidifierOn() const { return humidifierOn; }
     bool areLEDsOn() const;
     int getLEDsWatts() const;
-    int getReleState(uint8_t num) const;
+    int getRelayState(uint8_t relayNumber) const;
+
 private:
-    uint8_t _pinLED, _pinRele1, _pinRele2, _pinRele3, _pinRele4, _servoPin; // Adicione _servoPin aqui
-    Servo meuServo; // Mova a declaração do servo para dentro da classe
+    uint8_t _pinLED, _pinRelay1, _pinRelay2, _pinRelay3, _pinRelay4, _servoPin;
+    Servo myServo;
     FirebaseHandler* firebaseHandler = nullptr;
     
-    // Variáveis de estado
-    bool umidLigado = false;
-    bool peltierHeating = false;
+    // State variables
+    bool humidifierOn = false;
+    bool peltierActive = false;
     unsigned long lastPeltierTime = 0;
-    unsigned long inicioCooldown = 0;
+    unsigned long cooldownStart = 0;
     
     // Setpoints
     int luxSetpoint = 5000;
     float tempMin = 20.0;
     float tempMax = 30.0;
-    float umidMin = 60.0;
-    float umidMax = 80.0;
-    int coSetpoint = 400;    // ppm
-    int co2Setpoint = 400;  // ppm
-    int tvocsSetpoint = 100; // ppb
+    float humidityMin = 60.0;
+    float humidityMax = 80.0;
+    int coSetpoint = 400;
+    int co2Setpoint = 400;
+    int tvocsSetpoint = 100;
     
-    // Novas variáveis para controle de estado
-    ModoPeltier modoPeltierAtual = DESLIGADO;
-    int intensidadeLEDAtual = 0;
-    bool rele1Estado = false;
-    bool rele2Estado = false;
-    bool rele3Estado = false;
-    bool rele4Estado = false;
+    // Current state variables
+    PeltierMode currentPeltierMode = OFF;
+    int currentLEDIntensity = 0;
+    bool relay1State = false;
+    bool relay2State = false;
+    bool relay3State = false;
+    bool relay4State = false;
     unsigned long lastUpdateTime = 0;
     
-    // Variáveis de segurança da Peltier
-    bool emCooldown = false;
-    const unsigned long tempoOperacao = 10000; // 10 segundos de operação
-    const unsigned long tempoCooldown = 10000; // 10 segundos de cooldown
+    // Peltier safety variables
+    bool inCooldown = false;
+    const unsigned long operationTime = 10000;
+    const unsigned long cooldownTime = 10000;
     
-    void atualizarEstadoFirebase();
+    void updateFirebaseState();
 };
 
 #endif

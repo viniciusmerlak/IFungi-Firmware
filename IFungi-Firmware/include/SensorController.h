@@ -14,7 +14,7 @@ public:
     int getCO2();
     int getCO();
     int getLight();
-    int getTVOCs(); // Método adicionado
+    int getTVOCs();
     
 private:
     static const uint8_t MQ7_PIN = 32;
@@ -33,9 +33,18 @@ private:
     float humidity;
     int co2;
     int co;
-    int tvocs; // Variável adicionada
+    int tvocs;
     int light;
     bool waterLevel;
+    
+    // Water level calibration
+    int waterLevelThreshold = 2000; // Default threshold - will be calibrated
+    bool waterLevelCalibrated = false;
+    int emptyValue = 4095; // Value when sensor is dry (max ADC)
+    int fullValue = 0;     // Value when sensor is submerged (min ADC)
+    
+    void calibrateWaterSensor();
+    bool readWaterLevel();
 };
 
 #endif
