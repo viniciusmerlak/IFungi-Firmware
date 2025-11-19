@@ -31,7 +31,66 @@ const unsigned long LOCAL_SAVE_INTERVAL = 60000;
 
 // LED task handle
 TaskHandle_t ledTaskHandle = NULL;
+// 🔥 ADICIONE ESTAS VARIÁVEIS GLOBAIS
+bool lastDebugMode = false;
+unsigned long lastDebugCheck = 0;
+const unsigned long DEBUG_CHECK_INTERVAL = 2000; // Verifica a cada 2 segundos
 
+// 🔥 ADICIONE ESTA FUNÇÃO NO loop()
+void handleDebugAndCalibration() {
+    // Verifica modo debug a cada 2 segundos
+    if (millis() - lastDebugCheck > DEBUG_CHECK_INTERVAL) {
+        lastDebugCheck = millis();
+        
+        bool currentDebugMode = firebase.getDebugMode();
+        
+        // Se o modo debug mudou, atualiza imediatamente
+        if (currentDebugMode != lastDebugMode) {
+            actuators.setDebugMode(currentDebugMode);
+            lastDebugMode = currentDebugMode;
+            
+            // Se saiu do modo debug, força uma atualização do estado atual
+            if (!currentDebugMode && firebase.isAuthenticated()) {
+                firebase.updateActuatorState(
+                    actuators.getRelayState(1),
+                    actuators.getRelayState(2),
+                    actuators.getRelayState(3),
+                    actuators.getRelayState(4),
+                    actuators.areLEDsOn(),
+                    actuators.getLEDsWatts(),
+                    actuators.isHumidifierOn()
+                );
+            }
+        }
+        
+        // Se está em modo debug, lê os estados manuais do Firebase
+        if (currentDebugMode) {
+            bool relay1, relay2, relay3, relay4, ledsOn, humidifierOn;
+            int ledsIntensity;
+            firebase.getManualActuatorStates(relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
+            actuators.setManualStates(relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
+        }
+        
+        // Verifica calibração do sensor de água
+        if (firebase.getWaterCalibrationDry()) {
+            sensors.calibrateWaterDry();
+            // Envia valores de calibração para o Firebase
+            firebase.sendWaterCalibrationValues(
+                sensors.getWaterSensorRaw(), 
+                0 // wet value será 0 por enquanto
+            );
+        }
+        
+        if (firebase.getWaterCalibrationWet()) {
+            sensors.calibrateWaterWet();
+            // Envia valores de calibração para o Firebase
+            firebase.sendWaterCalibrationValues(
+                0, // dry value será 0 por enquanto
+                sensors.getWaterSensorRaw()
+            );
+        }
+    }
+}
 void ledTask(void * parameter) {
     unsigned long lastBlinkTime = 0;
     int blinkState = 0;
@@ -483,6 +542,7 @@ void loop() {
     handleFirebase();
     handleHistoryAndLocalData();
     verifyConnectionStatus();
+    handleDebugAndCalibration(); // 🔥 NOVA FUNÇÃO
     
     // Small delay for stability
     delay(10);

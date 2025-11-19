@@ -115,6 +115,9 @@ void ActuatorController::applySetpoints(int lux, float tMin, float tMax, float u
 
 void ActuatorController::controlAutomatically(float temp, float humidity, int light, int co, int co2, int tvocs, bool waterLevel) {
     // Check Peltier safety (only for heating)
+    if (debugMode) {
+      return;
+    }
     if (peltierActive && currentPeltierMode == HEATING && 
         (millis() - lastPeltierTime >= operationTime)) {
         Serial.println("[SAFETY] Peltier operation time exceeded, starting cooldown");
@@ -198,6 +201,8 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
 }
 
 void ActuatorController::controlPeltier(bool cooling, bool on) {
+    bool stateChanged = false;
+    
     if (on) {
         // Check cooldown only for heating
         if (inCooldown && !cooling) {
@@ -207,41 +212,54 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
         
         if (cooling) {
             // Cooling mode: Relay1 HIGH, Relay2 LOW (no timeout)
-            digitalWrite(_pinRelay1, HIGH);
-            digitalWrite(_pinRelay2, LOW);
-            currentPeltierMode = COOLING;
-            relay1State = true;
-            relay2State = false;
-            Serial.println("[PELTIER] Cooling mode (no timeout)");
+            if (!relay1State || relay2State || currentPeltierMode != COOLING) {
+                digitalWrite(_pinRelay1, HIGH);
+                digitalWrite(_pinRelay2, LOW);
+                currentPeltierMode = COOLING;
+                relay1State = true;
+                relay2State = false;
+                stateChanged = true;
+                Serial.println("[PELTIER] Cooling mode (no timeout)");
+            }
         } else {
             // Heating mode: Relay1 HIGH, Relay2 HIGH (with timeout)
-            digitalWrite(_pinRelay1, HIGH);
-            digitalWrite(_pinRelay2, HIGH);
-            currentPeltierMode = HEATING;
-            relay1State = true;
-            relay2State = true;
-            Serial.println("[PELTIER] Heating mode (with timeout)");
+            if (!relay1State || !relay2State || currentPeltierMode != HEATING) {
+                digitalWrite(_pinRelay1, HIGH);
+                digitalWrite(_pinRelay2, HIGH);
+                currentPeltierMode = HEATING;
+                relay1State = true;
+                relay2State = true;
+                stateChanged = true;
+                Serial.println("[PELTIER] Heating mode (with timeout)");
+            }
         }
         peltierActive = true;
         lastPeltierTime = millis();
     } else {
         // Turn off both relays
-        digitalWrite(_pinRelay1, LOW);
-        digitalWrite(_pinRelay2, LOW);
-        peltierActive = false;
-        currentPeltierMode = OFF;
-        relay1State = false;
-        relay2State = false;
-        Serial.println("[PELTIER] Turned off");
+        if (relay1State || relay2State) {
+            digitalWrite(_pinRelay1, LOW);
+            digitalWrite(_pinRelay2, LOW);
+            peltierActive = false;
+            currentPeltierMode = OFF;
+            relay1State = false;
+            relay2State = false;
+            stateChanged = true;
+            Serial.println("[PELTIER] Turned off");
+        }
     }
     
-    // Update state to Firebase
-    if (firebaseHandler != nullptr) {
-        updateFirebaseState();
+    // 🔥 ATUALIZAÇÃO: Envia estado imediatamente se houve mudança
+    if (stateChanged && firebaseHandler != nullptr) {
+        updateFirebaseStateImmediately();
     }
 }
 
+
 void ActuatorController::controlLEDs(bool on, int intensity) {
+    bool stateChanged = false;
+    int oldIntensity = currentLEDIntensity;
+    
     if (on) {
         // Smooth transition to turn on
         for (int i = currentLEDIntensity; i <= intensity; i += 5) {
@@ -249,51 +267,74 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
             delay(10);
         }
         currentLEDIntensity = intensity;
-        Serial.printf("[LEDS] Turned on, Intensity: %d/255\n", intensity);
+        if (oldIntensity != intensity) {
+            stateChanged = true;
+            Serial.printf("[LEDS] Turned on, Intensity: %d/255\n", intensity);
+        }
     } else {
         // Smooth transition to turn off
         for (int i = currentLEDIntensity; i >= 0; i -= 5) {
             analogWrite(_pinLED, i);
             delay(10);
         }
+        if (currentLEDIntensity > 0) {
+            stateChanged = true;
+            Serial.println("[LEDS] Turned off");
+        }
         currentLEDIntensity = 0;
-        Serial.println("[LEDS] Turned off");
     }
     
-    // Update state to Firebase
-    if (firebaseHandler != nullptr) {
-        updateFirebaseState();
+    // 🔥 ATUALIZAÇÃO: Envia estado imediatamente se houve mudança
+    if (stateChanged && firebaseHandler != nullptr) {
+        updateFirebaseStateImmediately();
     }
 }
 
 void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
+    bool stateChanged = false;
+    
     switch(relayNumber) {
         case 1: 
-            digitalWrite(_pinRelay1, state ? HIGH : LOW);
-            relay1State = state;
+            if (relay1State != state) {
+                digitalWrite(_pinRelay1, state ? HIGH : LOW);
+                relay1State = state;
+                stateChanged = true;
+            }
             break;
         case 2: 
-            digitalWrite(_pinRelay2, state ? HIGH : LOW);
-            relay2State = state;
+            if (relay2State != state) {
+                digitalWrite(_pinRelay2, state ? HIGH : LOW);
+                relay2State = state;
+                stateChanged = true;
+            }
             break;
         case 3: 
-            digitalWrite(_pinRelay3, state ? HIGH : LOW);
-            relay3State = state;
-            humidifierOn = state; // Update humidifier state
+            if (relay3State != state) {
+                digitalWrite(_pinRelay3, state ? HIGH : LOW);
+                relay3State = state;
+                humidifierOn = state; // Update humidifier state
+                stateChanged = true;
+            }
             break;
         case 4: 
-            digitalWrite(_pinRelay4, state ? HIGH : LOW);
-            relay4State = state;
+            if (relay4State != state) {
+                digitalWrite(_pinRelay4, state ? HIGH : LOW);
+                relay4State = state;
+                stateChanged = true;
+            }
             break;
     }
     
-    Serial.printf("[RELAY %d] %s\n", relayNumber, state ? "ON" : "OFF");
-    
-    // Update state to Firebase
-    if (firebaseHandler != nullptr) {
-        updateFirebaseState();
+    if (stateChanged) {
+        Serial.printf("[RELAY %d] %s\n", relayNumber, state ? "ON" : "OFF");
+        
+        // 🔥 ATUALIZAÇÃO: Envia estado imediatamente se houve mudança
+        if (firebaseHandler != nullptr) {
+            updateFirebaseStateImmediately();
+        }
     }
 }
+
 
 void ActuatorController::updateFirebaseState() {
     if (firebaseHandler != nullptr) {
@@ -332,3 +373,61 @@ int ActuatorController::getRelayState(uint8_t relayNumber) const {
         default: return -1; // Invalid state
     }
 }
+// 🔥 NOVAS FUNÇÕES PARA DEBUG
+void ActuatorController::setDebugMode(bool debug) {
+    if (debug != debugMode) {
+        debugMode = debug;
+        Serial.println(debugMode ? "🔧 DEBUG MODE: ON" : "🔧 DEBUG MODE: OFF");
+        
+        // Atualiza o Firebase imediatamente quando o modo debug muda
+        if (firebaseHandler != nullptr) {
+            updateFirebaseStateImmediately();
+        }
+    }
+}
+
+void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsIntensity, bool humidifierOn) {
+    if (!debugMode) return;
+
+    // Aplica os estados manuais apenas se diferentes dos atuais
+    if (relay1 != relay1State) {
+        controlRelay(1, relay1);
+    }
+    if (relay2 != relay2State) {
+        controlRelay(2, relay2);
+    }
+    if (relay3 != relay3State) {
+        controlRelay(3, relay3);
+        // Atualiza o estado do umidificador
+        this->humidifierOn = relay3;
+    }
+    if (relay4 != relay4State) {
+        controlRelay(4, relay4);
+    }
+    if (ledsOn != (currentLEDIntensity > 0) || (ledsOn && ledsIntensity != currentLEDIntensity)) {
+        controlLEDs(ledsOn, ledsIntensity);
+    }
+}
+
+// 🔥 MODIFICAÇÃO: Função para atualização imediata no Firebase
+void ActuatorController::updateFirebaseStateImmediately() {
+    if (firebaseHandler != nullptr) {
+        firebaseHandler->updateActuatorState(
+            relay1State,
+            relay2State, 
+            relay3State, 
+            relay4State, 
+            (currentLEDIntensity > 0), 
+            currentLEDIntensity,
+            humidifierOn
+        );
+    }
+}
+
+// 🔥 MODIFICAÇÃO: Atualiza sempre que há mudança de estado
+
+// 🔥 MODIFICAÇÃO: controlLEDs também atualiza imediatamente
+
+
+// 🔥 MODIFICAÇÃO: controlRelay também atualiza imediatamente
+

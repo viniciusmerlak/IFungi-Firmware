@@ -19,6 +19,11 @@ public:
     void controlRelay(uint8_t relayNumber, bool state);
     void controlPeltier(bool cooling, bool on);
     void controlAutomatically(float temp, float humidity, int light, int co, int co2, int tvocs, bool waterLevel);
+    
+    // 🔥 NOVAS FUNÇÕES PARA DEBUG
+    void setDebugMode(bool debug);
+    void setManualStates(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsIntensity, bool humidifierOn);
+    
     bool heatPeltier(bool on);
     void saveSetpointsNVS();
     bool loadSetpointsNVS();
@@ -64,12 +69,17 @@ private:
     bool relay4State = false;
     unsigned long lastUpdateTime = 0;
     
+    // 🔥 NOVAS VARIÁVEIS PARA DEBUG
+    bool debugMode = false;
+    bool lastDebugMode = false;
+    
     // Peltier safety variables
     bool inCooldown = false;
     const unsigned long operationTime = 10000;
     const unsigned long cooldownTime = 10000;
     
     void updateFirebaseState();
+    void updateFirebaseStateImmediately(); // 🔥 NOVA FUNÇÃO
 };
 
 #endif

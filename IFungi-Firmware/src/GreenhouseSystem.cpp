@@ -581,3 +581,92 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         Serial.println("Error receiving setpoints: " + fbdo.errorReason());
     }
 }
+// 🔥 NOVAS FUNÇÕES PARA DEBUG E CALIBRAÇÃO
+
+bool FirebaseHandler::getDebugMode() {
+    if (!authenticated || !Firebase.ready()) {
+        return false;
+    }
+
+    String path = "/greenhouses/" + greenhouseId + "/debug_mode";
+    if (Firebase.getBool(fbdo, path.c_str())) {
+        return fbdo.boolData();
+    }
+    return false;
+}
+
+void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& relay3, bool& relay4, bool& ledsOn, int& ledsIntensity, bool& humidifierOn) {
+    if (!authenticated || !Firebase.ready()) {
+        return;
+    }
+
+    String path = "/greenhouses/" + greenhouseId + "/manual_actuators";
+    if (Firebase.getJSON(fbdo, path.c_str())) {
+        FirebaseJson *json = fbdo.jsonObjectPtr();
+        FirebaseJsonData result;
+
+        if (json->get(result, "rele1")) relay1 = result.boolValue;
+        if (json->get(result, "rele2")) relay2 = result.boolValue;
+        if (json->get(result, "rele3")) relay3 = result.boolValue;
+        if (json->get(result, "rele4")) relay4 = result.boolValue;
+        
+        FirebaseJsonData ledsResult;
+        if (json->get(ledsResult, "leds/ligado")) ledsOn = ledsResult.boolValue;
+        if (json->get(ledsResult, "leds/intensity")) ledsIntensity = ledsResult.intValue;
+        
+        if (json->get(result, "umidificador")) humidifierOn = result.boolValue;
+    }
+}
+
+bool FirebaseHandler::getWaterCalibrationDry() {
+    if (!authenticated || !Firebase.ready()) {
+        return false;
+    }
+
+    String path = "/greenhouses/" + greenhouseId + "/calibrate_water_dry";
+    if (Firebase.getBool(fbdo, path.c_str())) {
+        bool value = fbdo.boolData();
+        // Se ativado, resetar para falso após ler
+        if (value) {
+            Firebase.setBool(fbdo, path.c_str(), false);
+        }
+        return value;
+    }
+    return false;
+}
+
+bool FirebaseHandler::getWaterCalibrationWet() {
+    if (!authenticated || !Firebase.ready()) {
+        return false;
+    }
+
+    String path = "/greenhouses/" + greenhouseId + "/calibrate_water_wet";
+    if (Firebase.getBool(fbdo, path.c_str())) {
+        bool value = fbdo.boolData();
+        // Se ativado, resetar para falso após ler
+        if (value) {
+            Firebase.setBool(fbdo, path.c_str(), false);
+        }
+        return value;
+    }
+    return false;
+}
+
+void FirebaseHandler::sendWaterCalibrationValues(int dryValue, int wetValue) {
+    if (!authenticated || !Firebase.ready()) {
+        return;
+    }
+
+    String path = "/greenhouses/" + greenhouseId + "/water_calibration";
+    
+    FirebaseJson json;
+    json.set("dry_value", dryValue);
+    json.set("wet_value", wetValue);
+    json.set("threshold", (dryValue + wetValue) / 2); // Threshold automático
+    
+    if (Firebase.setJSON(fbdo, path.c_str(), json)) {
+        Serial.println("✅ Water calibration values sent to Firebase");
+    } else {
+        Serial.println("❌ Failed to send water calibration values: " + fbdo.errorReason());
+    }
+}

@@ -1,5 +1,6 @@
 #include "SensorController.h"
 #include <DHT.h>
+#include <Preferences.h>
 
 #define DHTPIN 33
 #define DHTTYPE DHT22
@@ -7,6 +8,8 @@
 DHT dht(DHTPIN, DHTTYPE);
 
 void SensorController::begin() {
+    Serial.println("Initializing SensorController...");
+    loadWaterCalibration();
     Serial.println("Initializing sensor DHT22");
     dht.begin();
     
@@ -122,14 +125,17 @@ void SensorController::update() {
             }
         }
 
-        // SIMPLIFIED water level reading - no calibration
+        // 🔥 LEITURA CALIBRADA DO SENSOR DE ÁGUA
         int waterSensorValue = analogRead(WATERLEVEL_PIN);
-        waterLevel = (waterSensorValue <= WATER_LEVEL_THRESHOLD);
+        // Usa os valores calibrados para determinar o threshold
+        int currentThreshold = (waterDryValue + waterWetValue) / 2;
+        waterLevel = (waterSensorValue <= currentThreshold);
         
         // Debug water sensor occasionally
         if(readCount % 5 == 0) {
-            Serial.printf("💧 Water sensor - Raw: %d, Threshold: %d, Water: %s\n", 
-                         waterSensorValue, WATER_LEVEL_THRESHOLD, waterLevel ? "LOW" : "OK");
+            Serial.printf("💧 Water sensor - Raw: %d, Dry: %d, Wet: %d, Threshold: %d, Water: %s\n", 
+                         waterSensorValue, waterDryValue, waterWetValue, currentThreshold, 
+                         waterLevel ? "LOW" : "OK");
         }
 
         // Log every 10 cycles (20 seconds)
@@ -140,6 +146,38 @@ void SensorController::update() {
         
         lastUpdate = millis();
         readCount++;
+    }
+}
+// 🔥 NOVAS FUNÇÕES PARA CALIBRAÇÃO
+void SensorController::calibrateWaterDry() {
+    waterDryValue = analogRead(WATERLEVEL_PIN);
+    // Salvar na NVS
+    Preferences preferences;
+    if (preferences.begin("water_calib", false)) {
+        preferences.putInt("dry", waterDryValue);
+        preferences.end();
+        Serial.println("💧 CALIBRAÇÃO SECO: " + String(waterDryValue));
+    }
+}
+
+void SensorController::calibrateWaterWet() {
+    waterWetValue = analogRead(WATERLEVEL_PIN);
+    // Salvar na NVS
+    Preferences preferences;
+    if (preferences.begin("water_calib", false)) {
+        preferences.putInt("wet", waterWetValue);
+        preferences.end();
+        Serial.println("💧 CALIBRAÇÃO MOLHADO: " + String(waterWetValue));
+    }
+}
+
+void SensorController::loadWaterCalibration() {
+    Preferences preferences;
+    if (preferences.begin("water_calib", true)) {
+        waterDryValue = preferences.getInt("dry", 2000);
+        waterWetValue = preferences.getInt("wet", 1000);
+        preferences.end();
+        Serial.println("💧 Calibração carregada - Seco: " + String(waterDryValue) + " Molhado: " + String(waterWetValue));
     }
 }
 
