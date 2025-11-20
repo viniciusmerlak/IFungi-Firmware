@@ -39,6 +39,10 @@ public:
     int getLEDsWatts() const;
     int getRelayState(uint8_t relayNumber) const;
 
+    // 🔥 NOVAS FUNÇÕES PARA CONTROLE DE ESCRITA
+    void setFirebaseWriteBlock(bool block);
+    bool canWriteToFirebase();
+
 private:
     uint8_t _pinLED, _pinRelay1, _pinRelay2, _pinRelay3, _pinRelay4, _servoPin;
     Servo myServo;
@@ -69,17 +73,22 @@ private:
     bool relay4State = false;
     unsigned long lastUpdateTime = 0;
     
-    // 🔥 NOVAS VARIÁVEIS PARA DEBUG
+    // 🔥 NOVAS VARIÁVEIS PARA DEBUG E CONTROLE DE ESCRITA
     bool debugMode = false;
     bool lastDebugMode = false;
     
+    // 🔥 VARIÁVEIS PARA CONTROLE DE ESCRITA NO FIREBASE
+    bool blockFirebaseWrite = false;
+    unsigned long firebaseWriteBlockTime = 0;
+    const unsigned long FIREBASE_WRITE_BLOCK_DURATION = 10000; // 10 segundos
+
     // Peltier safety variables
     bool inCooldown = false;
     const unsigned long operationTime = 10000;
     const unsigned long cooldownTime = 10000;
     
     void updateFirebaseState();
-    void updateFirebaseStateImmediately(); // 🔥 NOVA FUNÇÃO
+    void updateFirebaseStateImmediately();
 };
 
 #endif

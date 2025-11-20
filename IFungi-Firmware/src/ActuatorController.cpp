@@ -1,6 +1,33 @@
 #include "ActuatorController.h"
 #include <Preferences.h>
 
+// 🔥 NOVAS FUNÇÕES PARA CONTROLE DE ESCRITA
+void ActuatorController::setFirebaseWriteBlock(bool block) {
+    if (block) {
+        blockFirebaseWrite = true;
+        firebaseWriteBlockTime = millis();
+        Serial.println("🔒 Firebase write BLOCKED for manual control");
+    } else {
+        blockFirebaseWrite = false;
+        Serial.println("🔓 Firebase write UNBLOCKED");
+    }
+}
+
+bool ActuatorController::canWriteToFirebase() {
+    if (!blockFirebaseWrite) {
+        return true;
+    }
+    
+    // Se está bloqueado, verifica se já passou o tempo de bloqueio
+    if (millis() - firebaseWriteBlockTime > FIREBASE_WRITE_BLOCK_DURATION) {
+        blockFirebaseWrite = false;
+        Serial.println("🔓 Firebase write auto-UNBLOCKED (timeout)");
+        return true;
+    }
+    
+    return false;
+}
+
 void ActuatorController::saveSetpointsNVS() {
     Preferences preferences;
     if(!preferences.begin("setpoints", false)) {
@@ -88,6 +115,10 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRel
     inCooldown = false;
     cooldownStart = 0;
     
+    // 🔥 INICIALIZAÇÃO DAS NOVAS VARIÁVEIS
+    blockFirebaseWrite = false;
+    firebaseWriteBlockTime = 0;
+    
     Serial.println("ActuatorController initialized successfully");
 }
 
@@ -114,10 +145,12 @@ void ActuatorController::applySetpoints(int lux, float tMin, float tMax, float u
 }
 
 void ActuatorController::controlAutomatically(float temp, float humidity, int light, int co, int co2, int tvocs, bool waterLevel) {
-    // Check Peltier safety (only for heating)
+    // 🔥 CORREÇÃO: Não executa controle automático em modo debug
     if (debugMode) {
-      return;
+        return;
     }
+    
+    // Restante do código do controle automático...
     if (peltierActive && currentPeltierMode == HEATING && 
         (millis() - lastPeltierTime >= operationTime)) {
         Serial.println("[SAFETY] Peltier operation time exceeded, starting cooldown");
@@ -182,10 +215,12 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
         controlLEDs(newIntensity > 0, newIntensity);
     }
     
-    // 4. Update state to Firebase periodically
-    if (firebaseHandler != nullptr && millis() - lastUpdateTime > 5000) {
-        updateFirebaseState();
-        lastUpdateTime = millis();
+    // 4. Update state to Firebase periodicamente - CORREÇÃO: Verifica se pode escrever
+    if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && firebaseHandler->isFirebaseReady()) {
+        if (millis() - lastUpdateTime > 5000 && canWriteToFirebase()) {
+            updateFirebaseState();
+            lastUpdateTime = millis();
+        }
     }
     
     // 5. Gas control (CO, CO2, TVOCs)
@@ -249,12 +284,12 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
         }
     }
     
-    // 🔥 ATUALIZAÇÃO: Envia estado imediatamente se houve mudança
-    if (stateChanged && firebaseHandler != nullptr) {
+    // 🔥 CORREÇÃO: Atualiza Firebase apenas se pode escrever
+    if (stateChanged && firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
+        firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
         updateFirebaseStateImmediately();
     }
 }
-
 
 void ActuatorController::controlLEDs(bool on, int intensity) {
     bool stateChanged = false;
@@ -284,8 +319,9 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
         currentLEDIntensity = 0;
     }
     
-    // 🔥 ATUALIZAÇÃO: Envia estado imediatamente se houve mudança
-    if (stateChanged && firebaseHandler != nullptr) {
+    // 🔥 CORREÇÃO: Atualiza Firebase apenas se pode escrever
+    if (stateChanged && firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
+        firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
         updateFirebaseStateImmediately();
     }
 }
@@ -328,16 +364,17 @@ void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
     if (stateChanged) {
         Serial.printf("[RELAY %d] %s\n", relayNumber, state ? "ON" : "OFF");
         
-        // 🔥 ATUALIZAÇÃO: Envia estado imediatamente se houve mudança
-        if (firebaseHandler != nullptr) {
+        // 🔥 CORREÇÃO: Atualiza Firebase apenas se pode escrever
+        if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
+            firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
             updateFirebaseStateImmediately();
         }
     }
 }
 
-
 void ActuatorController::updateFirebaseState() {
-    if (firebaseHandler != nullptr) {
+    if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
+        firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
         firebaseHandler->updateActuatorState(
             relay1State,
             relay2State, 
@@ -347,6 +384,23 @@ void ActuatorController::updateFirebaseState() {
             currentLEDIntensity,
             humidifierOn
         );
+        Serial.println("✅ Estado dos atuadores atualizado no Firebase (periódico)");
+    }
+}
+
+void ActuatorController::updateFirebaseStateImmediately() {
+    if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
+        firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
+        firebaseHandler->updateActuatorState(
+            relay1State,
+            relay2State, 
+            relay3State, 
+            relay4State, 
+            (currentLEDIntensity > 0), 
+            currentLEDIntensity,
+            humidifierOn
+        );
+        Serial.println("✅ Estado dos atuadores atualizado no Firebase (imediato)");
     }
 }
 
@@ -373,61 +427,84 @@ int ActuatorController::getRelayState(uint8_t relayNumber) const {
         default: return -1; // Invalid state
     }
 }
+
 // 🔥 NOVAS FUNÇÕES PARA DEBUG
 void ActuatorController::setDebugMode(bool debug) {
     if (debug != debugMode) {
         debugMode = debug;
         Serial.println(debugMode ? "🔧 DEBUG MODE: ON" : "🔧 DEBUG MODE: OFF");
         
+        // Quando entra no modo debug, bloqueia escrita por um tempo
+        if (debugMode) {
+            setFirebaseWriteBlock(true);
+        }
+        
         // Atualiza o Firebase imediatamente quando o modo debug muda
-        if (firebaseHandler != nullptr) {
+        if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
+            firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
             updateFirebaseStateImmediately();
         }
     }
 }
-
 void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsIntensity, bool humidifierOn) {
     if (!debugMode) return;
 
+    // 🔥 BLOQUEIA ESCRITA NO FIREBASE durante mudanças manuais por TEMPO MAIOR
+    setFirebaseWriteBlock(true);
+
+    // 🔥 CORREÇÃO: Variáveis para detectar mudanças reais
+    bool anyChange = false;
+
     // Aplica os estados manuais apenas se diferentes dos atuais
     if (relay1 != relay1State) {
-        controlRelay(1, relay1);
+        digitalWrite(_pinRelay1, relay1 ? HIGH : LOW);
+        relay1State = relay1;
+        anyChange = true;
+        Serial.printf("[MANUAL] Relay 1: %s\n", relay1 ? "ON" : "OFF");
     }
     if (relay2 != relay2State) {
-        controlRelay(2, relay2);
+        digitalWrite(_pinRelay2, relay2 ? HIGH : LOW);
+        relay2State = relay2;
+        anyChange = true;
+        Serial.printf("[MANUAL] Relay 2: %s\n", relay2 ? "ON" : "OFF");
     }
     if (relay3 != relay3State) {
-        controlRelay(3, relay3);
-        // Atualiza o estado do umidificador
+        digitalWrite(_pinRelay3, relay3 ? HIGH : LOW);
+        relay3State = relay3;
         this->humidifierOn = relay3;
+        anyChange = true;
+        Serial.printf("[MANUAL] Relay 3 (Humidifier): %s\n", relay3 ? "ON" : "OFF");
     }
     if (relay4 != relay4State) {
-        controlRelay(4, relay4);
+        digitalWrite(_pinRelay4, relay4 ? HIGH : LOW);
+        relay4State = relay4;
+        anyChange = true;
+        Serial.printf("[MANUAL] Relay 4: %s\n", relay4 ? "ON" : "OFF");
     }
     if (ledsOn != (currentLEDIntensity > 0) || (ledsOn && ledsIntensity != currentLEDIntensity)) {
-        controlLEDs(ledsOn, ledsIntensity);
+        // Aplica mudança de LEDs sem atualizar Firebase (já está bloqueado)
+        if (ledsOn) {
+            for (int i = currentLEDIntensity; i <= ledsIntensity; i += 5) {
+                analogWrite(_pinLED, i);
+                delay(10);
+            }
+            currentLEDIntensity = ledsIntensity;
+        } else {
+            for (int i = currentLEDIntensity; i >= 0; i -= 5) {
+                analogWrite(_pinLED, i);
+                delay(10);
+            }
+            currentLEDIntensity = 0;
+        }
+        anyChange = true;
+        Serial.printf("[MANUAL] LEDs: %s, Intensity: %d/255\n", ledsOn ? "ON" : "OFF", ledsIntensity);
     }
-}
-
-// 🔥 MODIFICAÇÃO: Função para atualização imediata no Firebase
-void ActuatorController::updateFirebaseStateImmediately() {
-    if (firebaseHandler != nullptr) {
-        firebaseHandler->updateActuatorState(
-            relay1State,
-            relay2State, 
-            relay3State, 
-            relay4State, 
-            (currentLEDIntensity > 0), 
-            currentLEDIntensity,
-            humidifierOn
-        );
+    
+    if (anyChange) {
+        Serial.println("✅ Manual changes applied successfully");
     }
+    
+    // 🔥 ATUALIZAÇÃO: NÃO atualiza Firebase imediatamente após mudanças manuais
+    // Deixa o bloqueio ativo para prevenir escrita competitiva
+    // O Firebase será atualizado apenas quando o bloqueio expirar (10 segundos)
 }
-
-// 🔥 MODIFICAÇÃO: Atualiza sempre que há mudança de estado
-
-// 🔥 MODIFICAÇÃO: controlLEDs também atualiza imediatamente
-
-
-// 🔥 MODIFICAÇÃO: controlRelay também atualiza imediatamente
-

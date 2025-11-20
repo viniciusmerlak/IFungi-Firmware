@@ -38,7 +38,8 @@ public:
     unsigned long getCurrentTimestamp();
     void saveDataLocally(float temp, float humidity, int co2, int co, int lux, int tvocs, unsigned long timestamp);
     void sendLocalData();
- 
+    bool isGreenhouseStructureComplete(const String& greenhouseId);
+
     FirebaseData fbdo;
     String greenhouseId;
     String userUID;

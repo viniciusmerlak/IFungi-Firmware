@@ -36,21 +36,29 @@ bool lastDebugMode = false;
 unsigned long lastDebugCheck = 0;
 const unsigned long DEBUG_CHECK_INTERVAL = 2000; // Verifica a cada 2 segundos
 
-// 🔥 ADICIONE ESTA FUNÇÃO NO loop()
 void handleDebugAndCalibration() {
     // Verifica modo debug a cada 2 segundos
     if (millis() - lastDebugCheck > DEBUG_CHECK_INTERVAL) {
         lastDebugCheck = millis();
         
-        bool currentDebugMode = firebase.getDebugMode();
+        bool currentDebugMode = false;
+        
+        // Só tenta ler do Firebase se estiver autenticado
+        if (firebase.isAuthenticated() && firebase.isFirebaseReady()) {
+            currentDebugMode = firebase.getDebugMode();
+        }
         
         // Se o modo debug mudou, atualiza imediatamente
         if (currentDebugMode != lastDebugMode) {
             actuators.setDebugMode(currentDebugMode);
             lastDebugMode = currentDebugMode;
             
+            Serial.println(currentDebugMode ? "🔧 DEBUG MODE ENABLED" : "🔧 DEBUG MODE DISABLED");
+            
             // Se saiu do modo debug, força uma atualização do estado atual
             if (!currentDebugMode && firebase.isAuthenticated()) {
+                // Aguarda um pouco para garantir que todas as escritas estejam completas
+                delay(500);
                 firebase.updateActuatorState(
                     actuators.getRelayState(1),
                     actuators.getRelayState(2),
@@ -60,34 +68,63 @@ void handleDebugAndCalibration() {
                     actuators.getLEDsWatts(),
                     actuators.isHumidifierOn()
                 );
+                Serial.println("🔄 Updated actuator states after exiting debug mode");
             }
         }
         
-        // Se está em modo debug, lê os estados manuais do Firebase
-        if (currentDebugMode) {
+        // Se está em modo debug, lê os estados manuais do Firebase APENAS se houver mudanças
+        if (currentDebugMode && firebase.isAuthenticated() && firebase.isFirebaseReady()) {
+            static bool lastRelay1 = false, lastRelay2 = false, lastRelay3 = false, lastRelay4 = false;
+            static bool lastLedsOn = false;
+            static int lastLedsIntensity = 0;
+            static bool lastHumidifierOn = false;
+            
             bool relay1, relay2, relay3, relay4, ledsOn, humidifierOn;
             int ledsIntensity;
             firebase.getManualActuatorStates(relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
-            actuators.setManualStates(relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
+            
+            // 🔥 CORREÇÃO: Só aplica se houve mudança real nos valores
+            bool hasChanges = (relay1 != lastRelay1) || (relay2 != lastRelay2) || 
+                             (relay3 != lastRelay3) || (relay4 != lastRelay4) ||
+                             (ledsOn != lastLedsOn) || (ledsIntensity != lastLedsIntensity) ||
+                             (humidifierOn != lastHumidifierOn);
+            
+            if (hasChanges) {
+                Serial.println("🔄 Manual states changed, applying...");
+                actuators.setManualStates(relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
+                
+                // Atualiza os últimos valores conhecidos
+                lastRelay1 = relay1;
+                lastRelay2 = relay2;
+                lastRelay3 = relay3;
+                lastRelay4 = relay4;
+                lastLedsOn = ledsOn;
+                lastLedsIntensity = ledsIntensity;
+                lastHumidifierOn = humidifierOn;
+            }
         }
         
-        // Verifica calibração do sensor de água
-        if (firebase.getWaterCalibrationDry()) {
-            sensors.calibrateWaterDry();
-            // Envia valores de calibração para o Firebase
-            firebase.sendWaterCalibrationValues(
-                sensors.getWaterSensorRaw(), 
-                0 // wet value será 0 por enquanto
-            );
-        }
-        
-        if (firebase.getWaterCalibrationWet()) {
-            sensors.calibrateWaterWet();
-            // Envia valores de calibração para o Firebase
-            firebase.sendWaterCalibrationValues(
-                0, // dry value será 0 por enquanto
-                sensors.getWaterSensorRaw()
-            );
+        // Verifica calibração do sensor de água (só se autenticado)
+        if (firebase.isAuthenticated() && firebase.isFirebaseReady()) {
+            if (firebase.getWaterCalibrationDry()) {
+                Serial.println("💧 CALIBRATING WATER DRY...");
+                sensors.calibrateWaterDry();
+                // Envia valores de calibração para o Firebase
+                firebase.sendWaterCalibrationValues(
+                    sensors.getWaterSensorRaw(), 
+                    0 // wet value será 0 por enquanto
+                );
+            }
+            
+            if (firebase.getWaterCalibrationWet()) {
+                Serial.println("💧 CALIBRATING WATER WET...");
+                sensors.calibrateWaterWet();
+                // Envia valores de calibração para o Firebase
+                firebase.sendWaterCalibrationValues(
+                    0, // dry value será 0 por enquanto
+                    sensors.getWaterSensorRaw()
+                );
+            }
         }
     }
 }
@@ -453,6 +490,8 @@ void handleActuators() {
             sensors.getTVOCs(),
             sensors.getWaterLevel()
         );
+        
+        // 🔥 CORREÇÃO: Atualização redundante removida - já é feita dentro do controlAutomatically
         lastActuatorControl = millis();
     }
 }
@@ -542,8 +581,7 @@ void loop() {
     handleFirebase();
     handleHistoryAndLocalData();
     verifyConnectionStatus();
-    handleDebugAndCalibration(); // 🔥 NOVA FUNÇÃO
-    
+    handleDebugAndCalibration();
     // Small delay for stability
     delay(10);
 }

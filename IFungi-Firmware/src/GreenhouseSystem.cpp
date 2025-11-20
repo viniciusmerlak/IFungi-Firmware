@@ -45,11 +45,10 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     Serial.println("\nAuthentication failed: Timeout");
     return false;
 }
-
 void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, 
                                          bool ledsOn, int ledsWatts, bool humidifierOn) {
     if (!authenticated || !Firebase.ready()) {
-        Serial.println("Not authenticated to update actuators");
+        Serial.println("❌ Not authenticated or Firebase not ready to update actuators");
         return;
     }
 
@@ -68,13 +67,18 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
     actuators.set("umidificador", humidifierOn);
 
     json.set("lastUpdate", millis());
+    json.set("atuadores", actuators); // 🔥 CORREÇÃO: Estrutura correta
 
     String path = FirebaseHandler::getGreenhousesPath() + greenhouseId;
     
     if (Firebase.updateNode(fbdo, path.c_str(), json)) {
-        Serial.println("Actuator states updated successfully!");
+        Serial.println("✅ Actuator states updated successfully in Firebase!");
+        Serial.printf("   Relays: [%d,%d,%d,%d] LEDs: %s (%dW) Humidifier: %s\n", 
+                     relay1, relay2, relay3, relay4, 
+                     ledsOn ? "ON" : "OFF", ledsWatts,
+                     humidifierOn ? "ON" : "OFF");
     } else {
-        Serial.println("Failed to update actuators: " + fbdo.errorReason());
+        Serial.println("❌ Failed to update actuators: " + fbdo.errorReason());
     }
 }
 
@@ -415,6 +419,8 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     checkUserPermission(userUID, greenhouseId);
 
     FirebaseJson json;
+    
+    // 🔥 CORREÇÃO: Estrutura completa dos atuadores
     FirebaseJson actuators;
     actuators.set("leds/ligado", false);
     actuators.set("leds/watts", 0);
@@ -429,6 +435,7 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     json.set("currentUser", currentUser);
     json.set("lastUpdate", (int)time(nullptr));
 
+    // 🔥 CORREÇÃO: Estrutura completa dos sensores
     FirebaseJson sensors;
     sensors.set("tvocs", 0);
     sensors.set("co", 0);
@@ -438,33 +445,66 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     sensors.set("umidade", 0);
     json.set("sensores", sensors);
 
+    // 🔥 CORREÇÃO: Estrutura completa dos setpoints
     FirebaseJson setpoints;
-    setpoints.set("lux", 0);
-    setpoints.set("tMax", 0);
-    setpoints.set("tMin", 0);
-    setpoints.set("uMax", 0);
-    setpoints.set("uMin", 0);
-    setpoints.set("coSp", 0);
-    setpoints.set("co2Sp", 0);
-    setpoints.set("tvocsSp", 0);
+    setpoints.set("lux", 5000);
+    setpoints.set("tMax", 30.0);
+    setpoints.set("tMin", 20.0);
+    setpoints.set("uMax", 80.0);
+    setpoints.set("uMin", 60.0);
+    setpoints.set("coSp", 400);
+    setpoints.set("co2Sp", 400);
+    setpoints.set("tvocsSp", 100);
     json.set("setpoints", setpoints);
 
     json.set("niveis/agua", false);
 
+    // 🔥 NOVO: Campos para debug e controle manual
+    json.set("debug_mode", false); // Modo debug desativado por padrão
+    
+    // 🔥 NOVO: Estrutura para controle manual dos atuadores
+    FirebaseJson manualActuators;
+    manualActuators.set("rele1", false);
+    manualActuators.set("rele2", false);
+    manualActuators.set("rele3", false);
+    manualActuators.set("rele4", false);
+    manualActuators.set("leds/ligado", false);
+    manualActuators.set("leds/intensity", 0);
+    manualActuators.set("umidificador", false);
+    json.set("manual_actuators", manualActuators);
+
+    // 🔥 NOVO: Campos para calibração de água
+    json.set("calibrate_water_dry", false);
+    json.set("calibrate_water_wet", false);
+    
+    // 🔥 NOVO: Estrutura para valores de calibração de água
+    FirebaseJson waterCalibration;
+    waterCalibration.set("dry_value", 2000);
+    waterCalibration.set("wet_value", 1000);
+    waterCalibration.set("threshold", 1500);
+    json.set("water_calibration", waterCalibration);
+
+    // 🔥 NOVO: Status do sistema
+    FirebaseJson status;
+    status.set("online", true);
+    status.set("lastHeartbeat", millis());
+    status.set("ip", WiFi.localIP().toString());
+    json.set("status", status);
+
     String path = "/greenhouses/" + greenhouseId;
     if (Firebase.setJSON(fbdo, path.c_str(), json)) {
-        Serial.println("Greenhouse created successfully!");
+        Serial.println("✅ Greenhouse created successfully with complete structure!");
         checkUserPermission(userUID, greenhouseId);
     } else {
-        Serial.print("Error creating greenhouse: ");
+        Serial.print("❌ Error creating greenhouse: ");
         Serial.println(fbdo.errorReason());
         
         if (fbdo.errorReason().indexOf("token") >= 0) {
-            Serial.println("Invalid token, trying to renew...");
+            Serial.println("🔄 Invalid token, trying to renew...");
             Firebase.refreshToken(&config);
             delay(1000);
             if (Firebase.ready() && Firebase.setJSON(fbdo, path.c_str(), json)) {
-                Serial.println("Greenhouse created after renewing token!");
+                Serial.println("✅ Greenhouse created after renewing token!");
             }
         }
     }
@@ -497,9 +537,20 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
     }
 
     String path = "/greenhouses/" + greenhouseId;
+    
+    // Primeiro verifica se a estufa existe
     if (Firebase.get(fbdo, path.c_str())) {
         if (fbdo.dataType() != "null") {
-            Serial.println("Greenhouse found.");
+            Serial.println("Greenhouse found. Checking structure...");
+            
+            // Verifica se a estrutura está completa
+            if (!isGreenhouseStructureComplete(greenhouseId)) {
+                Serial.println("Greenhouse structure incomplete, recreating...");
+                createInitialGreenhouse(userUID, userUID);
+                return true; // Retorna true porque a estufa existe, mas foi recriada
+            }
+            
+            Serial.println("Greenhouse structure is complete.");
             return true;
         }
     }
@@ -508,6 +559,143 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
     createInitialGreenhouse(userUID, userUID);
     return false;
 }
+
+bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) {
+    if (!authenticated || !Firebase.ready()) {
+        return false;
+    }
+
+    String path = "/greenhouses/" + greenhouseId;
+    FirebaseJson json;
+    
+    // Lista de campos obrigatórios que devem existir
+    const char* requiredFields[] = {
+        "atuadores",
+        "atuadores/leds",
+        "atuadores/leds/ligado",
+        "atuadores/leds/watts",
+        "atuadores/rele1",
+        "atuadores/rele2", 
+        "atuadores/rele3",
+        "atuadores/rele4",
+        "atuadores/umidificador",
+        "sensores",
+        "sensores/temperatura",
+        "sensores/umidade",
+        "sensores/co2",
+        "sensores/co",
+        "sensores/tvocs",
+        "sensores/luminosidade",
+        "setpoints",
+        "setpoints/lux",
+        "setpoints/tMax",
+        "setpoints/tMin",
+        "setpoints/uMax",
+        "setpoints/uMin",
+        "setpoints/coSp",
+        "setpoints/co2Sp",
+        "setpoints/tvocsSp",
+        "niveis/agua",
+        "createdBy",
+        "currentUser",
+        "lastUpdate",
+        "status",
+        "status/online",
+        "status/lastHeartbeat"
+    };
+    
+    const int numFields = sizeof(requiredFields) / sizeof(requiredFields[0]);
+    
+    // Carrega o JSON completo da estufa
+    if (!Firebase.getJSON(fbdo, path.c_str())) {
+        Serial.println("❌ Error loading greenhouse JSON: " + fbdo.errorReason());
+        return false;
+    }
+    
+    FirebaseJson *jsonPtr = fbdo.jsonObjectPtr();
+    FirebaseJsonData result;
+    
+    // Verifica cada campo obrigatório
+    for (int i = 0; i < numFields; i++) {
+        if (!jsonPtr->get(result, requiredFields[i])) {
+            Serial.println("❌ Missing field: " + String(requiredFields[i]));
+            return false;
+        }
+        
+        // Verifica se o campo tem um valor válido (não é null)
+        if (result.typeNum == FirebaseJson::JSON_NULL) {
+            Serial.println("❌ Field is null: " + String(requiredFields[i]));
+            return false;
+        }
+    }
+    
+    // 🔥 CORREÇÃO: Verifica campos opcionais de debug e calibração
+    // Se não existirem, vamos criá-los para completar a estrutura
+    
+    bool needsUpdate = false;
+    FirebaseJson updateJson;
+    
+    // Verifica e cria campo debug_mode se não existir
+    if (!jsonPtr->get(result, "debug_mode")) {
+        Serial.println("⚠️ debug_mode field missing, creating...");
+        updateJson.set("debug_mode", false);
+        needsUpdate = true;
+    }
+    
+    // Verifica e cria estrutura manual_actuators se não existir
+    if (!jsonPtr->get(result, "manual_actuators")) {
+        Serial.println("⚠️ manual_actuators field missing, creating...");
+        FirebaseJson manualActuators;
+        manualActuators.set("rele1", false);
+        manualActuators.set("rele2", false);
+        manualActuators.set("rele3", false);
+        manualActuators.set("rele4", false);
+        manualActuators.set("leds/ligado", false);
+        manualActuators.set("leds/intensity", 0);
+        manualActuators.set("umidificador", false);
+        updateJson.set("manual_actuators", manualActuators);
+        needsUpdate = true;
+    }
+    
+    // Verifica e cria campos de calibração de água se não existirem
+    if (!jsonPtr->get(result, "calibrate_water_dry")) {
+        Serial.println("⚠️ calibrate_water_dry field missing, creating...");
+        updateJson.set("calibrate_water_dry", false);
+        needsUpdate = true;
+    }
+    
+    if (!jsonPtr->get(result, "calibrate_water_wet")) {
+        Serial.println("⚠️ calibrate_water_wet field missing, creating...");
+        updateJson.set("calibrate_water_wet", false);
+        needsUpdate = true;
+    }
+    
+    if (!jsonPtr->get(result, "water_calibration")) {
+        Serial.println("⚠️ water_calibration field missing, creating...");
+        FirebaseJson waterCalibration;
+        waterCalibration.set("dry_value", 2000);
+        waterCalibration.set("wet_value", 1000);
+        waterCalibration.set("threshold", 1500);
+        updateJson.set("water_calibration", waterCalibration);
+        needsUpdate = true;
+    }
+    
+    // Se faltam campos, atualiza a estufa no Firebase
+    if (needsUpdate) {
+        Serial.println("🔄 Completing greenhouse structure with missing fields...");
+        if (Firebase.updateNode(fbdo, path.c_str(), updateJson)) {
+            Serial.println("✅ Greenhouse structure completed successfully!");
+        } else {
+            Serial.println("❌ Failed to complete greenhouse structure: " + fbdo.errorReason());
+            return false;
+        }
+    }
+    
+    Serial.println("✅ All required fields are present and valid");
+    return true;
+}
+
+
 
 bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
     Preferences preferences;
@@ -596,6 +784,15 @@ bool FirebaseHandler::getDebugMode() {
 }
 
 void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& relay3, bool& relay4, bool& ledsOn, int& ledsIntensity, bool& humidifierOn) {
+    // 🔥 CORREÇÃO: Inicializa com valores padrão
+    relay1 = false;
+    relay2 = false;
+    relay3 = false;
+    relay4 = false;
+    ledsOn = false;
+    ledsIntensity = 0;
+    humidifierOn = false;
+    
     if (!authenticated || !Firebase.ready()) {
         return;
     }
@@ -610,11 +807,15 @@ void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& 
         if (json->get(result, "rele3")) relay3 = result.boolValue;
         if (json->get(result, "rele4")) relay4 = result.boolValue;
         
-        FirebaseJsonData ledsResult;
-        if (json->get(ledsResult, "leds/ligado")) ledsOn = ledsResult.boolValue;
-        if (json->get(ledsResult, "leds/intensity")) ledsIntensity = ledsResult.intValue;
+        if (json->get(result, "leds/ligado")) ledsOn = result.boolValue;
+        if (json->get(result, "leds/intensity")) ledsIntensity = result.intValue;
         
         if (json->get(result, "umidificador")) humidifierOn = result.boolValue;
+        
+        Serial.printf("🔧 Manual states from Firebase - R1:%d R2:%d R3:%d R4:%d LED:%d(%d) HUM:%d\n",
+                     relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
+    } else {
+        Serial.println("❌ Failed to read manual actuator states: " + fbdo.errorReason());
     }
 }
 
