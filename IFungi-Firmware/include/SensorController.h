@@ -1,8 +1,9 @@
-#ifndef SENSOR_CONTROLLER_H
-#define SENSOR_CONTROLLER_H
+#ifndef SENSORCONTROLLER_H
+#define SENSORCONTROLLER_H
 
-#include <Adafruit_CCS811.h>
+#include <Arduino.h>
 #include <DHT.h>
+#include <Adafruit_CCS811.h>
 
 class SensorController {
 public:
@@ -20,7 +21,7 @@ private:
     static const uint8_t MQ7_PIN = 35;
     static const uint8_t DHT_PIN = 33;
     static const uint8_t LDR_PIN = 34;
-    static const uint8_t WATERLEVEL_PIN = 32; // Pino para sensor de água
+    static const uint8_t WATERLEVEL_PIN = 32;
     
     DHT dht{DHT_PIN, DHT22};
     Adafruit_CCS811 ccs;
@@ -37,8 +38,9 @@ private:
     int light;
     bool waterLevel;
     
-    // 🔥 SIMPLIFICADO: Threshold fixo para sensor de água
-    const int WATER_LEVEL_THRESHOLD = 100; // Valor empírico - ajuste conforme necessário
+    // 🔥 THRESHOLD CORRIGIDO baseado nas suas medições
+    // SECO: ~1985 (1.6V), MOLHADO: ~1849-1861 (1.49-1.50V)
+    const int WATER_LEVEL_THRESHOLD = 1917; // Valor médio
 };
 
 #endif

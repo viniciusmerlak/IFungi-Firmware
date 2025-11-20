@@ -45,10 +45,11 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     Serial.println("\nAuthentication failed: Timeout");
     return false;
 }
+
 void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, 
                                          bool ledsOn, int ledsWatts, bool humidifierOn) {
     if (!authenticated || !Firebase.ready()) {
-        Serial.println("❌ Not authenticated or Firebase not ready to update actuators");
+        Serial.println("[FIREBASE] ERRO - Não autenticado para atualizar atuadores");
         return;
     }
 
@@ -67,21 +68,16 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
     actuators.set("umidificador", humidifierOn);
 
     json.set("lastUpdate", millis());
-    json.set("atuadores", actuators); // 🔥 CORREÇÃO: Estrutura correta
+    json.set("atuadores", actuators);
 
     String path = FirebaseHandler::getGreenhousesPath() + greenhouseId;
     
     if (Firebase.updateNode(fbdo, path.c_str(), json)) {
-        Serial.println("✅ Actuator states updated successfully in Firebase!");
-        Serial.printf("   Relays: [%d,%d,%d,%d] LEDs: %s (%dW) Humidifier: %s\n", 
-                     relay1, relay2, relay3, relay4, 
-                     ledsOn ? "ON" : "OFF", ledsWatts,
-                     humidifierOn ? "ON" : "OFF");
+        Serial.println("[FIREBASE] Estados dos atuadores atualizados com sucesso");
     } else {
-        Serial.println("❌ Failed to update actuators: " + fbdo.errorReason());
+        Serial.println("[FIREBASE] ERRO - Falha ao atualizar atuadores: " + fbdo.errorReason());
     }
 }
-
 void FirebaseHandler::refreshTokenIfNeeded() {
     if(!initialized || !authenticated) return;
     
@@ -117,7 +113,7 @@ FirebaseHandler::~FirebaseHandler() {
 
 bool FirebaseHandler::sendDataToHistory(float temp, float humidity, int co2, int co, int lux, int tvocs) {
     if (!authenticated || !Firebase.ready()) {
-        Serial.println("📴 Firebase not available for history");
+        Serial.println("[FIREBASE] OFFLINE - Dados salvos localmente");
         unsigned long timestamp = getCurrentTimestamp();
         saveDataLocally(temp, humidity, co2, co, lux, tvocs, timestamp);
         return false;
@@ -137,10 +133,10 @@ bool FirebaseHandler::sendDataToHistory(float temp, float humidity, int co2, int
     json.set("dataHora", getFormattedDateTime());
     
     if (Firebase.setJSON(fbdo, path.c_str(), json)) {
-        Serial.println("✅ Data saved to history successfully!");
+        Serial.println("[FIREBASE] Dados salvos no histórico com sucesso");
         return true;
     } else {
-        Serial.println("❌ Failed to save history: " + fbdo.errorReason());
+        Serial.println("[FIREBASE] ERRO - Falha ao salvar histórico: " + fbdo.errorReason());
         unsigned long timestamp = getCurrentTimestamp();
         saveDataLocally(temp, humidity, co2, co, lux, tvocs, timestamp);
         return false;
@@ -337,7 +333,7 @@ void FirebaseHandler::sendLocalData() {
 void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel) {
     refreshTokenIfNeeded();
     if (!authenticated || !Firebase.ready()) {
-        Serial.println("Not authenticated or invalid token");
+        Serial.println("[FIREBASE] ERRO - Não autenticado para enviar dados");
         return;
     }
 
@@ -352,7 +348,11 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
     json.set("niveis/agua", waterLevel);
 
     String path = "/greenhouses/" + greenhouseId;
-    Firebase.updateNode(fbdo, path.c_str(), json);
+    if (Firebase.updateNode(fbdo, path.c_str(), json)) {
+        Serial.println("[FIREBASE] Dados dos sensores enviados com sucesso");
+    } else {
+        Serial.println("[FIREBASE] ERRO - Falha ao enviar dados: " + fbdo.errorReason());
+    }
     
     if (millis() - lastHistoryTime > HISTORY_INTERVAL) {
         sendDataToHistory(temp, humidity, co2, co, lux, tvocs);

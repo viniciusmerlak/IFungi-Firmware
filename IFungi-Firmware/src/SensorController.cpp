@@ -1,23 +1,22 @@
 #include "SensorController.h"
 #include <DHT.h>
-#include <Preferences.h>
-
-#define DHTPIN 33
-#define DHTTYPE DHT22
-
-DHT dht(DHTPIN, DHT22);
 
 void SensorController::begin() {
-    Serial.println("Initializing SensorController...");
+    Serial.println("[SENSOR] Inicializando controlador de sensores...");
     
-    // 🔥 REMOVIDO: Carregamento de calibração
+    // Configuração dos pinos
+    pinMode(WATERLEVEL_PIN, INPUT);
+    pinMode(LDR_PIN, INPUT);
+    pinMode(MQ7_PIN, INPUT);
+
+    Serial.println("[SENSOR] Configuração de pinos concluída");
+    Serial.printf("[SENSOR] Threshold sensor água: %d\n", WATER_LEVEL_THRESHOLD);
     
-    Serial.println("Initializing sensor DHT22");
+    // Inicialização DHT22
+    Serial.println("[SENSOR] Inicializando DHT22...");
     dht.begin();
-    
     delay(2000);
     
-    // DHT22 initialization with retries
     int dhtAttempts = 0;
     dhtOK = false;
     
@@ -27,60 +26,50 @@ void SensorController::begin() {
         
         if (!isnan(tempTest) && !isnan(humidityTest)) {
             dhtOK = true;
-            Serial.println("DHT22 initialized successfully!");
+            Serial.println("[SENSOR] DHT22 inicializado com sucesso");
         } else {
-            Serial.printf("Attempt %d: Failed to read DHT22\n", dhtAttempts + 1);
+            Serial.printf("[SENSOR] Tentativa %d: Falha na leitura do DHT22\n", dhtAttempts + 1);
             dhtAttempts++;
             delay(1000);
         }
     }
     
     if (!dhtOK) {
-        Serial.println("WARNING: DHT22 not responding. Continuing without temperature/humidity sensor.");
+        Serial.println("[SENSOR] DHT22: ERRO - Sensor não responde");
     }
 
-    // Initialize pins
-    pinMode(LDR_PIN, INPUT);
-    pinMode(MQ7_PIN, INPUT);
-    pinMode(WATERLEVEL_PIN, INPUT);
-
-    // CCS811 initialization with improved error handling
-    Serial.println("Initializing sensor CCS811");
+    // Inicialização CCS811
+    Serial.println("[SENSOR] Inicializando CCS811...");
     ccsOK = false;
     
     for (int attempt = 0; attempt < 3; attempt++) {
         if (ccs.begin()) {
             ccsOK = true;
-            Serial.println("CCS811 initialized successfully!");
+            Serial.println("[SENSOR] CCS811 inicializado com sucesso");
             
-            // Wait for sensor to be ready with timeout
             unsigned long startTime = millis();
             while (!ccs.available() && (millis() - startTime < 5000)) {
                 delay(100);
             }
             
             if (ccs.available()) {
-                Serial.println("CCS811 ready for reading");
+                Serial.println("[SENSOR] CCS811 pronto para leitura");
                 break;
             } else {
-                Serial.println("CCS811 didn't become ready within timeout");
+                Serial.println("[SENSOR] CCS811: ERRO - Não ficou pronto dentro do timeout");
                 ccsOK = false;
             }
         } else {
-            Serial.printf("Attempt %d: Failed to initialize CCS811\n", attempt + 1);
+            Serial.printf("[SENSOR] Tentativa %d: Falha na inicialização do CCS811\n", attempt + 1);
             delay(1000);
         }
     }
     
     if (!ccsOK) {
-        Serial.println("WARNING: CCS811 not initialized. Continuing without CO2/TVOC sensor.");
+        Serial.println("[SENSOR] CCS811: ERRO - Sensor não inicializado");
     }
 
-    // 🔥 SIMPLIFICADO: Inicialização do sensor de água
-    Serial.println("💧 Water level sensor initialized - Simple analog read");
-    Serial.println("💧 Using fixed threshold: " + String(WATER_LEVEL_THRESHOLD));
-
-    // Initialize variables
+    // Inicialização de variáveis
     lastUpdate = 0;
     co2 = 0;
     co = 0;
@@ -90,58 +79,61 @@ void SensorController::begin() {
     light = 0;
     waterLevel = false;
     
-    Serial.println("SensorController initialized");
+    Serial.println("[SENSOR] Controlador de sensores inicializado com sucesso");
 }
 
 void SensorController::update() {
-    // Ensure reading every 2 seconds
     if(millis() - lastUpdate >= 2000) {
         static unsigned int readCount = 0;
         
-        // Basic readings always happen
+        // Leituras básicas
         light = analogRead(LDR_PIN);
         co = analogRead(MQ7_PIN);
         
-        // DHT reading only if OK
+        // Leitura DHT22
         if(dhtOK && (readCount % 2 == 0)) {
             temperature = dht.readTemperature();
             humidity = dht.readHumidity();
             
-            // Check if readings are valid
             if (isnan(temperature) || isnan(humidity)) {
-                Serial.println("Invalid DHT22 reading");
-                dhtOK = false; // Mark as faulty
+                Serial.println("[SENSOR] DHT22: ERRO - Leitura inválida");
+                dhtOK = false;
             }
         }
         
-        // CCS811 reading only if OK
+        // Leitura CCS811
         if(ccsOK && (readCount % 3 == 0)) {
             if (ccs.available()) {
                 if (!ccs.readData()) {
                     co2 = ccs.geteCO2();
                     tvocs = ccs.getTVOC();
                 } else {
-                    Serial.println("Error reading CCS811");
-                    ccsOK = false; // Mark as faulty
+                    Serial.println("[SENSOR] CCS811: ERRO - Falha na leitura");
+                    ccsOK = false;
                 }
             }
         }
 
-        // 🔥 SIMPLIFICADO: Leitura direta do sensor de água
+        // 🔥 LEITURA CORRETA DO SENSOR DE ÁGUA
         int waterSensorValue = analogRead(WATERLEVEL_PIN);
-        waterLevel = (waterSensorValue >= WATER_LEVEL_THRESHOLD);
         
-        // Debug water sensor occasionally
+        // LÓGICA: 
+        // - Valor ALTO (>1917) = Sensor SECO = ÁGUA BAIXA (true)
+        // - Valor BAIXO (<1917) = Sensor MOLHADO = ÁGUA OK (false)
+        waterLevel = (waterSensorValue > WATER_LEVEL_THRESHOLD);
+        
+        // Debug detalhado do sensor de água
         if(readCount % 5 == 0) {
-            Serial.printf("💧 Water sensor - Raw: %d, Threshold: %d, Water: %s\n", 
-                         waterSensorValue, WATER_LEVEL_THRESHOLD, 
-                         waterLevel ? "LOW" : "OK");
+            float voltage = (waterSensorValue / 4095.0) * 3.3;
+            Serial.printf("[SENSOR] Água: %d (%1.2fV) -> %s\n", 
+                         waterSensorValue, voltage,
+                         waterLevel ? "BAIXA" : "OK");
         }
-
-        // Log every 10 cycles (20 seconds)
+        
+        // Log resumido a cada 10 ciclos
         if(readCount % 10 == 0) {
-            Serial.printf("Readings - Temp: %.1f C, Humidity: %.1f %%, Light: %d, CO: %d, CO2: %d ppm, TVOCs: %d ppb, Water Level: %s\n", 
-                         temperature, humidity, light, co, co2, tvocs, waterLevel ? "LOW" : "OK");
+            Serial.printf("[SENSOR] DHT22: %.1fC, %.1f%%, LDR: %d, MQ-7: %d, CCS811: %d ppm\n", 
+                         temperature, humidity, light, co, co2);
         }
         
         lastUpdate = millis();
@@ -149,8 +141,9 @@ void SensorController::update() {
     }
 }
 
-// 🔥 REMOVIDO: Todas as funções de calibração (calibrateWaterDry, calibrateWaterWet, loadWaterCalibration)
+// 🔥 REMOVIDO: Funções de calibração manualCalibrateWaterSensor e autoCalibrateWaterSensor
 
+// Mantenha as funções get
 float SensorController::getTemperature() { return temperature; }
 float SensorController::getHumidity() { return humidity; }
 int SensorController::getCO2() { return co2; }

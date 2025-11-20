@@ -536,31 +536,33 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    Serial.println("\n\n🚀 Starting IFungi Greenhouse System...");
+    Serial.println("\n\n[SISTEMA] Iniciando Sistema IFungi Greenhouse...");
     
-    // Initialize LED task first
+    // Inicializar tarefa LED
     setupLEDTask();
     
-    // Initial configuration
+    // Configuração inicial
     setupSensorsAndActuators();
     setupWiFiAndFirebase();
 
-    // Generate greenhouse ID
+    // Gerar ID da estufa
     greenhouseID = "IFUNGI-" + getMacAddress();
-    Serial.println("🏷️ Greenhouse ID: " + greenhouseID);
+    Serial.println("[SISTEMA] ID da Estufa: " + greenhouseID);
     qrGenerator.generateQRCode(greenhouseID);
 
-    Serial.println("✅ System initialized and ready!");
+    Serial.println("[SISTEMA] Sistema inicializado e pronto para operação");
 }
 
+
 void loop() {
-    // Execute periodic tasks
+    // Executar tarefas periódicas
     handleSensors();
     handleActuators();
     handleFirebase();
     handleHistoryAndLocalData();
     verifyConnectionStatus();
     handleDebugAndCalibration();
-    // Small delay for stability
+    
+    // Pequeno delay para estabilidade
     delay(10);
 }

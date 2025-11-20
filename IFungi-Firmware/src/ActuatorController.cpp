@@ -186,8 +186,12 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
         controlPeltier(false, false); // Turn off
     }
     
-    // 2. Humidity control - CORRECTED LOGIC
-    if (!waterLevel) {
+    // 🔥 CORREÇÃO: Lógica do umidificador corrigida
+    // waterLevel = TRUE quando água está BAIXA (sensor seco)
+    // waterLevel = FALSE quando água está OK (sensor molhado)
+    
+    if (waterLevel) {
+        // Água BAIXA - Desliga umidificador por segurança
         Serial.println("[SAFETY] Low water level, turning off humidifier");
         if (humidifierOn) {
             controlRelay(3, false); // Turn off humidifier
@@ -195,17 +199,24 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
         }
     } 
     else {
-        // Only control humidity if water level is OK
-        if (humidity < (humidityMin - HYSTERESIS_HUMIDITY) && !humidifierOn) {
-            Serial.printf("[ACTUATOR] Humidity below (%.1f < %.1f), turning on humidifier\n", humidity, humidityMin);
-            controlRelay(3, true); // Turn on humidifier
-            humidifierOn = true;
+        // Água OK - Controla umidificador normalmente baseado na umidade
+        if (humidity < (humidityMin - HYSTERESIS_HUMIDITY)) {
+            // Umidade abaixo do mínimo - Liga umidificador
+            if (!humidifierOn) {
+                Serial.printf("[ACTUATOR] Humidity below (%.1f < %.1f), turning ON humidifier\n", humidity, humidityMin);
+                controlRelay(3, true); // Turn ON humidifier
+                humidifierOn = true;
+            }
         } 
-        else if (humidity > (humidityMax + HYSTERESIS_HUMIDITY) && humidifierOn) {
-            Serial.printf("[ACTUATOR] Humidity above (%.1f > %.1f), turning off humidifier\n", humidity, humidityMax);
-            controlRelay(3, false); // Turn off humidifier
-            humidifierOn = false;
+        else if (humidity > (humidityMax + HYSTERESIS_HUMIDITY)) {
+            // Umidade acima do máximo - Desliga umidificador
+            if (humidifierOn) {
+                Serial.printf("[ACTUATOR] Humidity above (%.1f > %.1f), turning OFF humidifier\n", humidity, humidityMax);
+                controlRelay(3, false); // Turn OFF humidifier
+                humidifierOn = false;
+            }
         }
+        // Se a umidade está dentro da faixa, mantém o estado atual
     }
     
     // 3. Light control - LEDs
@@ -239,14 +250,12 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
     bool stateChanged = false;
     
     if (on) {
-        // Check cooldown only for heating
         if (inCooldown && !cooling) {
-            Serial.println("[SAFETY] Peltier in cooldown, cannot turn on for heating");
+            Serial.println("[ATUADOR] Peltier: BLOQUEADO - Em período de cooldown");
             return;
         }
         
         if (cooling) {
-            // Cooling mode: Relay1 HIGH, Relay2 LOW (no timeout)
             if (!relay1State || relay2State || currentPeltierMode != COOLING) {
                 digitalWrite(_pinRelay1, HIGH);
                 digitalWrite(_pinRelay2, LOW);
@@ -254,10 +263,9 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
                 relay1State = true;
                 relay2State = false;
                 stateChanged = true;
-                Serial.println("[PELTIER] Cooling mode (no timeout)");
+                Serial.println("[ATUADOR] Peltier: Modo resfriamento ATIVADO");
             }
         } else {
-            // Heating mode: Relay1 HIGH, Relay2 HIGH (with timeout)
             if (!relay1State || !relay2State || currentPeltierMode != HEATING) {
                 digitalWrite(_pinRelay1, HIGH);
                 digitalWrite(_pinRelay2, HIGH);
@@ -265,13 +273,12 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
                 relay1State = true;
                 relay2State = true;
                 stateChanged = true;
-                Serial.println("[PELTIER] Heating mode (with timeout)");
+                Serial.println("[ATUADOR] Peltier: Modo aquecimento ATIVADO");
             }
         }
         peltierActive = true;
         lastPeltierTime = millis();
     } else {
-        // Turn off both relays
         if (relay1State || relay2State) {
             digitalWrite(_pinRelay1, LOW);
             digitalWrite(_pinRelay2, LOW);
@@ -280,7 +287,7 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
             relay1State = false;
             relay2State = false;
             stateChanged = true;
-            Serial.println("[PELTIER] Turned off");
+            Serial.println("[ATUADOR] Peltier: DESLIGADO");
         }
     }
     
@@ -296,7 +303,6 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
     int oldIntensity = currentLEDIntensity;
     
     if (on) {
-        // Smooth transition to turn on
         for (int i = currentLEDIntensity; i <= intensity; i += 5) {
             analogWrite(_pinLED, i);
             delay(10);
@@ -304,17 +310,16 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
         currentLEDIntensity = intensity;
         if (oldIntensity != intensity) {
             stateChanged = true;
-            Serial.printf("[LEDS] Turned on, Intensity: %d/255\n", intensity);
+            Serial.printf("[ATUADOR] LEDs: LIGADO, Intensidade: %d/255\n", intensity);
         }
     } else {
-        // Smooth transition to turn off
         for (int i = currentLEDIntensity; i >= 0; i -= 5) {
             analogWrite(_pinLED, i);
             delay(10);
         }
         if (currentLEDIntensity > 0) {
             stateChanged = true;
-            Serial.println("[LEDS] Turned off");
+            Serial.println("[ATUADOR] LEDs: DESLIGADO");
         }
         currentLEDIntensity = 0;
     }
@@ -325,7 +330,6 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
         updateFirebaseStateImmediately();
     }
 }
-
 void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
     bool stateChanged = false;
     
@@ -348,7 +352,7 @@ void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
             if (relay3State != state) {
                 digitalWrite(_pinRelay3, state ? HIGH : LOW);
                 relay3State = state;
-                humidifierOn = state; // Update humidifier state
+                humidifierOn = state;
                 stateChanged = true;
             }
             break;
@@ -362,7 +366,7 @@ void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
     }
     
     if (stateChanged) {
-        Serial.printf("[RELAY %d] %s\n", relayNumber, state ? "ON" : "OFF");
+        Serial.printf("[ATUADOR] Rele %d: %s\n", relayNumber, state ? "LIGADO" : "DESLIGADO");
         
         // 🔥 CORREÇÃO: Atualiza Firebase apenas se pode escrever
         if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
@@ -384,9 +388,10 @@ void ActuatorController::updateFirebaseState() {
             currentLEDIntensity,
             humidifierOn
         );
-        Serial.println("✅ Estado dos atuadores atualizado no Firebase (periódico)");
+        Serial.println("[FIREBASE] Estado dos atuadores atualizado (periódico)");
     }
 }
+
 
 void ActuatorController::updateFirebaseStateImmediately() {
     if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
@@ -400,7 +405,7 @@ void ActuatorController::updateFirebaseStateImmediately() {
             currentLEDIntensity,
             humidifierOn
         );
-        Serial.println("✅ Estado dos atuadores atualizado no Firebase (imediato)");
+        Serial.println("[FIREBASE] Estado dos atuadores atualizado (imediato)");
     }
 }
 
