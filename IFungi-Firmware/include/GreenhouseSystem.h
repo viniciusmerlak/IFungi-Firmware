@@ -56,9 +56,7 @@ public:
     // 🔥 NOVAS FUNÇÕES PARA DEBUG E CALIBRAÇÃO
     bool getDebugMode();
     void getManualActuatorStates(bool& relay1, bool& relay2, bool& relay3, bool& relay4, bool& ledsOn, int& ledsIntensity, bool& humidifierOn);
-    bool getWaterCalibrationDry();
-    bool getWaterCalibrationWet();
-    void sendWaterCalibrationValues(int dryValue, int wetValue);
+
 
 private:
     String getMacAddress();

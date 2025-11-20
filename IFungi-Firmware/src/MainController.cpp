@@ -83,7 +83,7 @@ void handleDebugAndCalibration() {
             int ledsIntensity;
             firebase.getManualActuatorStates(relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
             
-            // 🔥 CORREÇÃO: Só aplica se houve mudança real nos valores
+            // Só aplica se houve mudança real nos valores
             bool hasChanges = (relay1 != lastRelay1) || (relay2 != lastRelay2) || 
                              (relay3 != lastRelay3) || (relay4 != lastRelay4) ||
                              (ledsOn != lastLedsOn) || (ledsIntensity != lastLedsIntensity) ||
@@ -104,28 +104,6 @@ void handleDebugAndCalibration() {
             }
         }
         
-        // Verifica calibração do sensor de água (só se autenticado)
-        if (firebase.isAuthenticated() && firebase.isFirebaseReady()) {
-            if (firebase.getWaterCalibrationDry()) {
-                Serial.println("💧 CALIBRATING WATER DRY...");
-                sensors.calibrateWaterDry();
-                // Envia valores de calibração para o Firebase
-                firebase.sendWaterCalibrationValues(
-                    sensors.getWaterSensorRaw(), 
-                    0 // wet value será 0 por enquanto
-                );
-            }
-            
-            if (firebase.getWaterCalibrationWet()) {
-                Serial.println("💧 CALIBRATING WATER WET...");
-                sensors.calibrateWaterWet();
-                // Envia valores de calibração para o Firebase
-                firebase.sendWaterCalibrationValues(
-                    0, // dry value será 0 por enquanto
-                    sensors.getWaterSensorRaw()
-                );
-            }
-        }
     }
 }
 void ledTask(void * parameter) {
@@ -475,6 +453,7 @@ void verifyConnectionStatus() {
 void handleSensors() {
     if (millis() - lastSensorRead > SENSOR_READ_INTERVAL) {
         sensors.update();
+
         lastSensorRead = millis();
     }
 }

@@ -5,11 +5,13 @@
 #define DHTPIN 33
 #define DHTTYPE DHT22
 
-DHT dht(DHTPIN, DHTTYPE);
+DHT dht(DHTPIN, DHT22);
 
 void SensorController::begin() {
     Serial.println("Initializing SensorController...");
-    loadWaterCalibration();
+    
+    // 🔥 REMOVIDO: Carregamento de calibração
+    
     Serial.println("Initializing sensor DHT22");
     dht.begin();
     
@@ -74,9 +76,9 @@ void SensorController::begin() {
         Serial.println("WARNING: CCS811 not initialized. Continuing without CO2/TVOC sensor.");
     }
 
-    // Water level sensor initialization - SIMPLIFIED
-    Serial.println("Initializing water level sensor");
-    Serial.println("💧 Using fixed threshold: 2000");
+    // 🔥 SIMPLIFICADO: Inicialização do sensor de água
+    Serial.println("💧 Water level sensor initialized - Simple analog read");
+    Serial.println("💧 Using fixed threshold: " + String(WATER_LEVEL_THRESHOLD));
 
     // Initialize variables
     lastUpdate = 0;
@@ -125,16 +127,14 @@ void SensorController::update() {
             }
         }
 
-        // 🔥 LEITURA CALIBRADA DO SENSOR DE ÁGUA
+        // 🔥 SIMPLIFICADO: Leitura direta do sensor de água
         int waterSensorValue = analogRead(WATERLEVEL_PIN);
-        // Usa os valores calibrados para determinar o threshold
-        int currentThreshold = (waterDryValue + waterWetValue) / 2;
-        waterLevel = (waterSensorValue <= currentThreshold);
+        waterLevel = (waterSensorValue >= WATER_LEVEL_THRESHOLD);
         
         // Debug water sensor occasionally
         if(readCount % 5 == 0) {
-            Serial.printf("💧 Water sensor - Raw: %d, Dry: %d, Wet: %d, Threshold: %d, Water: %s\n", 
-                         waterSensorValue, waterDryValue, waterWetValue, currentThreshold, 
+            Serial.printf("💧 Water sensor - Raw: %d, Threshold: %d, Water: %s\n", 
+                         waterSensorValue, WATER_LEVEL_THRESHOLD, 
                          waterLevel ? "LOW" : "OK");
         }
 
@@ -148,38 +148,8 @@ void SensorController::update() {
         readCount++;
     }
 }
-// 🔥 NOVAS FUNÇÕES PARA CALIBRAÇÃO
-void SensorController::calibrateWaterDry() {
-    waterDryValue = analogRead(WATERLEVEL_PIN);
-    // Salvar na NVS
-    Preferences preferences;
-    if (preferences.begin("water_calib", false)) {
-        preferences.putInt("dry", waterDryValue);
-        preferences.end();
-        Serial.println("💧 CALIBRAÇÃO SECO: " + String(waterDryValue));
-    }
-}
 
-void SensorController::calibrateWaterWet() {
-    waterWetValue = analogRead(WATERLEVEL_PIN);
-    // Salvar na NVS
-    Preferences preferences;
-    if (preferences.begin("water_calib", false)) {
-        preferences.putInt("wet", waterWetValue);
-        preferences.end();
-        Serial.println("💧 CALIBRAÇÃO MOLHADO: " + String(waterWetValue));
-    }
-}
-
-void SensorController::loadWaterCalibration() {
-    Preferences preferences;
-    if (preferences.begin("water_calib", true)) {
-        waterDryValue = preferences.getInt("dry", 2000);
-        waterWetValue = preferences.getInt("wet", 1000);
-        preferences.end();
-        Serial.println("💧 Calibração carregada - Seco: " + String(waterDryValue) + " Molhado: " + String(waterWetValue));
-    }
-}
+// 🔥 REMOVIDO: Todas as funções de calibração (calibrateWaterDry, calibrateWaterWet, loadWaterCalibration)
 
 float SensorController::getTemperature() { return temperature; }
 float SensorController::getHumidity() { return humidity; }

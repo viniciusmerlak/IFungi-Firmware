@@ -473,16 +473,8 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     manualActuators.set("umidificador", false);
     json.set("manual_actuators", manualActuators);
 
-    // 🔥 NOVO: Campos para calibração de água
-    json.set("calibrate_water_dry", false);
-    json.set("calibrate_water_wet", false);
+
     
-    // 🔥 NOVO: Estrutura para valores de calibração de água
-    FirebaseJson waterCalibration;
-    waterCalibration.set("dry_value", 2000);
-    waterCalibration.set("wet_value", 1000);
-    waterCalibration.set("threshold", 1500);
-    json.set("water_calibration", waterCalibration);
 
     // 🔥 NOVO: Status do sistema
     FirebaseJson status;
@@ -658,27 +650,6 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
     }
     
     // Verifica e cria campos de calibração de água se não existirem
-    if (!jsonPtr->get(result, "calibrate_water_dry")) {
-        Serial.println("⚠️ calibrate_water_dry field missing, creating...");
-        updateJson.set("calibrate_water_dry", false);
-        needsUpdate = true;
-    }
-    
-    if (!jsonPtr->get(result, "calibrate_water_wet")) {
-        Serial.println("⚠️ calibrate_water_wet field missing, creating...");
-        updateJson.set("calibrate_water_wet", false);
-        needsUpdate = true;
-    }
-    
-    if (!jsonPtr->get(result, "water_calibration")) {
-        Serial.println("⚠️ water_calibration field missing, creating...");
-        FirebaseJson waterCalibration;
-        waterCalibration.set("dry_value", 2000);
-        waterCalibration.set("wet_value", 1000);
-        waterCalibration.set("threshold", 1500);
-        updateJson.set("water_calibration", waterCalibration);
-        needsUpdate = true;
-    }
     
     // Se faltam campos, atualiza a estufa no Firebase
     if (needsUpdate) {
@@ -819,55 +790,7 @@ void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& 
     }
 }
 
-bool FirebaseHandler::getWaterCalibrationDry() {
-    if (!authenticated || !Firebase.ready()) {
-        return false;
-    }
 
-    String path = "/greenhouses/" + greenhouseId + "/calibrate_water_dry";
-    if (Firebase.getBool(fbdo, path.c_str())) {
-        bool value = fbdo.boolData();
-        // Se ativado, resetar para falso após ler
-        if (value) {
-            Firebase.setBool(fbdo, path.c_str(), false);
-        }
-        return value;
-    }
-    return false;
-}
 
-bool FirebaseHandler::getWaterCalibrationWet() {
-    if (!authenticated || !Firebase.ready()) {
-        return false;
-    }
 
-    String path = "/greenhouses/" + greenhouseId + "/calibrate_water_wet";
-    if (Firebase.getBool(fbdo, path.c_str())) {
-        bool value = fbdo.boolData();
-        // Se ativado, resetar para falso após ler
-        if (value) {
-            Firebase.setBool(fbdo, path.c_str(), false);
-        }
-        return value;
-    }
-    return false;
-}
 
-void FirebaseHandler::sendWaterCalibrationValues(int dryValue, int wetValue) {
-    if (!authenticated || !Firebase.ready()) {
-        return;
-    }
-
-    String path = "/greenhouses/" + greenhouseId + "/water_calibration";
-    
-    FirebaseJson json;
-    json.set("dry_value", dryValue);
-    json.set("wet_value", wetValue);
-    json.set("threshold", (dryValue + wetValue) / 2); // Threshold automático
-    
-    if (Firebase.setJSON(fbdo, path.c_str(), json)) {
-        Serial.println("✅ Water calibration values sent to Firebase");
-    } else {
-        Serial.println("❌ Failed to send water calibration values: " + fbdo.errorReason());
-    }
-}
