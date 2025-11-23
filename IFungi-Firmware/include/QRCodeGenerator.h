@@ -1,10 +1,10 @@
-#ifndef GEN_QR_CODE_H
-#define GEN_QR_CODE_H
+#ifndef QR_CODE_GENERATOR_H
+#define QR_CODE_GENERATOR_H
 
 #include <Arduino.h>
 #include <qrcode.h>
 
-class GenQR {
+class QRCodeGenerator {
 public:
     void generateQRCode(const String& id);
 };

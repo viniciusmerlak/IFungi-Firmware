@@ -1,229 +1,175 @@
-# IFungi - Estufa Automatizada para Cogumelos
+# IFungi-Firmware
 
-![IFungi](https://img.shields.io/badge/IFungi-Automated%20Mushroom%20Greenhouse-brightgreen)
-![Platform](https://img.shields.io/badge/Platform-ESP32-0078D7)
-![Framework](https://img.shields.io/badge/Framework-Arduino%20PlatformIO-00979D)
-![Database](https://img.shields.io/badge/Database-Firebase-FFCA28)
+IFungi é uma estufa automatizada que controla temperatura, umidade, gases e iluminação remotamente com um custo acessível. Este repositório contém o código do ESP-32 que controla a estufa, desenvolvido utilizando PlatformIO e VSCode. Inclui documentação utilizando Doxygen.
 
-O IFungi é um sistema completo de estufa automatizada para cultivo de cogumelos que controla automaticamente fatores abióticos como temperatura, umidade, iluminação e qualidade do ar.
+## Arquitetura do Sistema
 
-## 🌟 Funcionalidades
+O sistema IFungi é composto por módulos especializados que trabalham em conjunto para automatizar o controle ambiental da estufa:
 
-- **Controle Climático Automático**: Regula temperatura com pastilha Peltier (aquecimento/resfriamento)
-- **Gestão de Umidade**: Acionamento automático de umidificador
-- **Iluminação Controlada**: Barra de LEDs com intensidade ajustável
-- **Monitoramento de Gases**: Sensores de CO₂, CO e TVOC
-- **Conexão WiFi**: Configuração fácil via modo AP
-- **Integração Firebase**: Dados em tempo real e controle remoto
-- **Sistema de Segurança**: Timeout automático para proteção da Peltier
-- **Heartbeat**: Status online/offline em tempo real
-- **Interface Web**: Configuração local via servidor web integrado
+### Módulos Principais
 
-## 🛠️ Hardware
+- **MainController.cpp** - Controlador principal que orquestra todos os componentes
+- **SensorController.cpp** - Gerencia leituras de todos os sensores ambientais
+- **ActuatorController.cpp** - Controla todos os atuadores e lógica de automação
+- **GreenhouseSystem.cpp** - Handler para comunicação com Firebase
+- **DeviceUtils.cpp** - Utilitários do dispositivo (MAC address, etc.)
+- **QRCodeGenerator.cpp** - Geração de QR Code para identificação
 
-### Componentes Principais
-- **Microcontrolador**: ESP32
-- **Sensores**:
-  - DHT22 (Temperatura e Umidade)
-  - CCS811 (CO₂ e TVOC)
-  - MQ-7 (CO)
-  - LDR (Sensor de Luz)
-- **Atuadores**:
-  - Pastilha Peltier (Controle de temperatura)
-  - Módulo de 4 Relés
-  - Umidificador
-  - Exaustor
-  - Barra de LEDs
-- **Alimentação**: Fonte 12V para relés e Peltier
+## Funcionalidades
 
-### Esquema de Ligação
-| Componente       | Pino ESP32 |
-|------------------|------------|
-| DHT22           | GPIO33     |
-| CCS811          | I2C (SDA/SCL) |
-| MQ-7            | GPIO32     |
-| LDR             | GPIO34     |
-| LED Strip       | GPIO4      |
-| Rele 1 (Peltier) | GPIO23     |
-| Rele 2 (Peltier) | GPIO14     |
-| Rele 3 (Umidificador) | GPIO18  |
-| Rele 4 (Exaustor) | GPIO19    |
+### Controle Automático Inteligente
+- **Controle de Temperatura**: Sistema Peltier bidirecional (aquecimento/resfriamento) com proteção térmica
+- **Controle de Umidade**: Umidificador com proteção por sensor de nível de água
+- **Controle de Iluminação**: LEDs com efeito fade in/out baseado em luminosidade
+- **Ventilação e Qualidade do Ar**: Exaustor com dampers servo-controlados baseado em níveis de CO2, CO e TVOCs
+- **Sistema de Histerese**: Evita oscilações frequentes dos atuadores
 
-## 📦 Dependências
+### Comunicação e Conectividade
+- **WiFi Manager**: Configuração via portal web com fallback para modo AP
+- **Firebase Realtime**: Sincronização em tempo real de dados e estados
+- **Modo Offline**: Funcionamento autônomo com armazenamento local em NVS
+- **Heartbeat**: Monitoramento contínuo do status do sistema
+- **ID Único**: Identificação baseada em MAC address com QR Code
 
-- [FirebaseESP32](https://github.com/mobizt/Firebase-ESP32)
-- [DHT Sensor Library](https://github.com/adafruit/DHT-sensor-library)
-- [Adafruit_CCS811](https://github.com/adafruit/Adafruit_CCS811)
-- [ArduinoJSON](https://github.com/bblanchon/ArduinoJson)
-- [QRCode](https://github.com/ricmoo/QRCode)
+### Modos de Operação
+- **Modo Automático**: Controle baseado em setpoints pré-definidos
+- **Modo Debug**: Controle manual completo dos atuadores via Firebase
+- **Modo Desenvolvimento**: Operações avançadas para teste de hardware
+- **Modo Calibração**: Ajuste fino de sensores e parâmetros
 
-## ⚙️ Configuração
+## Hardware
 
-### 1. Pré-requisitos
-- Conta no [Firebase](https://firebase.google.com/)
-- Arduino IDE ou PlatformIO
-- App React Native (separado)
+### Sensores
+- **DHT22**: Temperatura e Umidade
+- **CCS811**: CO2 e TVOCs (Compostos Orgânicos Voláteis)
+- **LDR**: Sensor de Luminosidade
+- **MQ-7**: Sensor de Monóxido de Carbono
+- **Sensor de Água**: Nível do reservatório
 
-### 2. Configuração do Firebase
-1. Crie um projeto no Firebase Console
-2. Ative o Authentication (Email/Senha)
-3. Crie um Realtime Database
-4. Anote a API Key e Database URL
+### Atuadores
+- **Módulo Peltier**: Controle bidirecional de temperatura (2 relés)
+- **Umidificador**: Controle de umidade relativa
+- **LEDs Grow**: Iluminação com controle PWM
+- **Exaustor + Dampers**: Ventilação com servo motor
+- **Sistema de Relés**: Controle de potência (4 relés)
 
-### 3. Instalação
-```bash
-# Clone o repositório
-git clone https://github.com/seu-usuario/IFungi.git
+### Controlador
+- **ESP32**: Microcontrolador principal com WiFi e Bluetooth
+- **Conversor Analógico-Digital**: Leitura de sensores analógicos
+- **Driver PWM**: Controle de intensidade luminosa
 
-# Abra no PlatformIO ou Arduino IDE
-cd IFungi
+## Configuração
+
+### Pré-requisitos
+- PlatformIO IDE (recomendado) ou Arduino IDE
+- ESP32 DevKit ou similar
+- Biblioteca Firebase ESP Client
+- Sensores e atuadores conforme lista acima
+
+### Configuração Inicial
+1. Clone o repositório
+2. Configure as credenciais do Firebase via portal web
+3. Carregue o código no ESP32
+4. Acesse o portal de configuração via WiFi
+5. O sistema estará operacional automaticamente
+
+## Estrutura de Dados no Firebase
+
+### Estrutura Principal
+```
+/greenhouses/IFUNGI-{MAC_ADDRESS}/
+├── atuadores/
+│   ├── leds/{ligado, watts}
+│   ├── rele1, rele2, rele3, rele4
+│   └── umidificador
+├── sensores/
+│   ├── temperatura, umidade
+│   ├── co2, co, tvocs
+│   └── luminosidade
+├── setpoints/
+│   ├── lux, tMin, tMax, uMin, uMax
+│   └── coSp, co2Sp, tvocsSp
+├── manual_actuators/ (modo debug)
+├── devmode/ (modo desenvolvimento)
+├── status/{online, lastHeartbeat, ip}
+└── niveis/agua
 ```
 
-### 4. Configuração Inicial
-1. Conecte-se ao AP `IFungi-Config` (senha: `config1234`)
-2. Acesse `http://192.168.4.1`
-3. Configure a rede WiFi
-4. Insira as credenciais do Firebase
-5. A estufa se registrará automaticamente
-
-## 🚀 Uso
-
-### Controle Automático
-O sistema opera automaticamente baseado nos setpoints:
-- **Temperatura**: 20-30°C (ajustável)
-- **Umidade**: 60-80% (ajustável)
-- **Luminosidade**: 5000 lux (ajustável)
-
-### Controle Manual via App
-O aplicativo React Native permite:
-- Visualizar dados em tempo real
-- Ajustar setpoints remotamente
-- Controlar atuadores manualmente
-- Verificar status de conexão
-
-### Estrutura de Dados no Firebase
-```json
-{
-  "estufas": {
-    "IFUNGI-MAC-ADDRESS": {
-      "sensores": {
-        "temperatura": 25.6,
-        "umidade": 70.2,
-        "co2": 450,
-        "co": 2,
-        "luminosidade": 3200
-      },
-      "atuadores": {
-        "rele1": true,
-        "rele2": false,
-        "rele3": true,
-        "rele4": false,
-        "leds": {
-          "ligado": true,
-          "watts": 200
-        }
-      },
-      "setpoints": {
-        "lux": 5000,
-        "tMax": 30.0,
-        "tMin": 20.0,
-        "uMax": 80.0,
-        "uMin": 60.0
-      },
-      "status": {
-        "online": true,
-        "lastHeartbeat": 1645637890123,
-        "ip": "192.168.1.100"
-      }
-    }
-  }
-}
+### Histórico de Dados
+```
+/historico/IFUNGI-{MAC_ADDRESS}/{timestamp}
+├── temperatura, umidade
+├── co2, co, tvocs
+├── luminosidade
+└── dataHora (ISO 8601)
 ```
 
-## 🔧 Personalização
+## Fluxo de Operação
 
-### Ajustar Setpoints
-Modifique os valores padrão em `ActuatorController.cpp`:
-```cpp
-void ActuatorController::aplicarSetpoints(int lux, float tMin, float tMax, float uMin, float uMax) {
-    luxSetpoint = lux;
-    tempMin = tMin;
-    tempMax = tMax;
-    umidMin = uMin;
-    umidMax = uMax;
-}
-```
+1. **Inicialização**: Carrega configurações da NVS, conecta WiFi, autentica Firebase
+2. **Leitura de Sensores**: Coleta dados ambientais a cada 2 segundos
+3. **Processamento**: Aplica lógica de controle baseada em setpoints
+4. **Atuação**: Controla atuadores conforme necessidades detectadas
+5. **Sincronização**: Envia dados para Firebase e recebe comandos
+6. **Backup**: Armazena dados localmente em caso de offline
 
-### Modificar Tempos de Segurança
-Ajuste os tempos de operação e cooldown no header:
-```cpp
-const unsigned long tempoOperacao = 10000;  // 10 segundos operação
-const unsigned long tempoCooldown = 10000;  // 10 segundos cooldown
-```
+## Recursos de Segurança
 
-## 📋 Protocolo de Comunicação
+- **Proteção Térmica Peltier**: Limite de tempo de operação e cooldown obrigatório
+- **Sensor de Água**: Desliga umidificador automaticamente em nível baixo
+- **Watchdog Interno**: Recuperação de travamentos do sistema
+- **Validação de Dados**: Verificação de integridade das leituras dos sensores
+- **Bloqueio de Escrita**: Prevenção de conflitos durante operações manuais
 
-### Heartbeat
-A estufa envia heartbeat a cada 30 segundos:
-```json
-{
-  "online": true,
-  "lastHeartbeat": 1645637890123,
-  "ip": "192.168.1.100"
-}
-```
+## Controles Avançados
 
-### Comandos
-O aplicativo pode enviar comandos para:
-- Controlar relés individualmente
-- Ajustar intensidade dos LEDs
-- Modificar setpoints
+### Modo Debug
+Permite controle manual completo via Firebase:
+- Controle individual de cada relé
+- Ajuste de intensidade dos LEDs
+- Ativação/desativação manual do umidificador
 
-## 🐛 Solução de Problemas
+### Modo Desenvolvimento
+Operações avançadas para teste:
+- Leitura analógica de pinos específicos
+- Controle digital de saídas
+- Geração de sinais PWM
+- Teste de hardware individual
 
-### Erros Comuns
-1. **Falha de conexão WiFi**: Verifique as credenciais salvas
-2. **Autenticação Firebase**: Confirme email e senha
-3. **Sensor não responde**: Verifique as conexões
+## Monitoramento e Diagnóstico
 
-### Logs de Depuração
-O sistema emite logs detalhados pela porta serial (115200 baud):
-```
-[ATUADOR] Temperatura abaixo (19.5 < 20.0), aquecendo
-[PELTIER] Modo aquecimento (com timeout)
-[SEGURANÇA] Tempo de operação excedido, iniciando cooldown
-```
+- Logs detalhados via Serial (115200 baud)
+- LED indicador de status com padrões visuais
+- Heartbeat periódico para monitoramento remoto
+- Métricas de qualidade de sinal WiFi
+- Detecção e recuperação de falhas de sensores
 
-## 🤝 Contribuição
+## Performance
 
-Contribuições são bem-vindas! Sinta-se à vontade para:
+- **Leitura de Sensores**: 2 segundos
+- **Controle de Atuadores**: 5 segundos  
+- **Atualização Firebase**: 5 segundos
+- **Heartbeat**: 30 segundos
+- **Histórico**: 5 minutos
+- **Backup Local**: 1 minuto
 
-1. Fazer um fork do projeto
-2. Criar uma branch para sua feature (`git checkout -b feature/AmazingFeature`)
-3. Commit suas mudanças (`git commit -m 'Add some AmazingFeature'`)
-4. Push para a branch (`git push origin feature/AmazingFeature`)
-5. Abrir um Pull Request
+## Documentação
 
-## 📄 Licença
+### Acesso a documentação
+Para acessar a documentação deve-se instalar no windows/linux/mac **Doxygen** pelo link **https://www.doxygen.nl/download.html**, após a instalação deve-se executar o arquivo **generate_docs.bat** na raiz do projeto.
 
-Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para detalhes.
+## Como rodar?
 
-## 👥 Autores
+### PlatformIO
+Para testar o codigo e compilar para o esp32, é utilizado a ide PlatformIO.
 
-- **Seu Nome** - *Desenvolvimento inicial* - [SeuGitHub](https://github.com/seu-usuario)
+Passos para realizar a compilação:
+1. **Instalar a extensão no VScode**: PlatformIO IDE
+2. **Clonar repositorio do github**: `git clone https://github.com/viniciusmerlak/IFungi-Firmware.git`
+3. **Entrar no diretorio correto**: `cd IFungi-Firmware`
+4. **Na extensão platformIO**: Clique em Open Project
+5. **Selecione o diretorio do repositorio**: IFungi-Firmware
+6. **Precione F1 e pesquise por Platformio:build na area de pesquisa do vscode**: `F1` -> `Platformio:build`
+7. **Veja o codigo sendo compilado**: Sucesso!
 
-## 🙌 Agradecimentos
 
-- IFPR Campus Quedas do Iguaçu
-- Orientadores do projeto
-- Contribuidores do código aberto
-
----
-
-**IFungi** - Cultivo inteligente de cogumelos 🌱🍄
-
-<<<<<<< HEAD
-Para mais informações, visite nossa [Wiki](https://github.com/seu-usuario/IFungi/wiki) ou abra uma [issue](https://github.com/seu-usuario/IFungi/issues).
-=======
-Para mais informações, visite nossa [Wiki](https://github.com/seu-usuario/IFungi/wiki) ou abra uma [issue](https://github.com/seu-usuario/IFungi/issues).
->>>>>>> 257cfe9e5b6c758ce14c62f16e3ad7fbf635c842
