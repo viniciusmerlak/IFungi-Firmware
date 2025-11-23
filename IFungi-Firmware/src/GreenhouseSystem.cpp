@@ -78,6 +78,7 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
         Serial.println("[FIREBASE] ERRO - Falha ao atualizar atuadores: " + fbdo.errorReason());
     }
 }
+
 void FirebaseHandler::refreshTokenIfNeeded() {
     if(!initialized || !authenticated) return;
     
@@ -473,8 +474,14 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     manualActuators.set("umidificador", false);
     json.set("manual_actuators", manualActuators);
 
-
-    
+    // 🔥 NOVO: Estrutura para devmode
+    FirebaseJson devmode;
+    devmode.set("analogRead", false);
+    devmode.set("boolean", false);
+    devmode.set("pin", -1);
+    devmode.set("pwm", false);
+    devmode.set("pwmValue", 0);
+    json.set("devmode", devmode);
 
     // 🔥 NOVO: Status do sistema
     FirebaseJson status;
@@ -649,7 +656,18 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         needsUpdate = true;
     }
     
-    // Verifica e cria campos de calibração de água se não existirem
+    // 🔥 NOVO: Verifica e cria estrutura devmode se não existir
+    if (!jsonPtr->get(result, "devmode")) {
+        Serial.println("⚠️ devmode field missing, creating...");
+        FirebaseJson devmode;
+        devmode.set("analogRead", false);
+        devmode.set("boolean", false);
+        devmode.set("pin", -1);
+        devmode.set("pwm", false);
+        devmode.set("pwmValue", 0);
+        updateJson.set("devmode", devmode);
+        needsUpdate = true;
+    }
     
     // Se faltam campos, atualiza a estufa no Firebase
     if (needsUpdate) {
@@ -665,8 +683,6 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
     Serial.println("✅ All required fields are present and valid");
     return true;
 }
-
-
 
 bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
     Preferences preferences;
@@ -740,6 +756,7 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         Serial.println("Error receiving setpoints: " + fbdo.errorReason());
     }
 }
+
 // 🔥 NOVAS FUNÇÕES PARA DEBUG E CALIBRAÇÃO
 
 bool FirebaseHandler::getDebugMode() {
@@ -790,7 +807,33 @@ void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& 
     }
 }
 
+// 🔥 NOVA FUNÇÃO: Obtém configurações do devmode
+void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWrite, int& pin, bool& pwm, int& pwmValue) {
+    // Valores padrão
+    analogRead = false;
+    digitalWrite = false;
+    pin = -1;
+    pwm = false;
+    pwmValue = 0;
+    
+    if (!authenticated || !Firebase.ready()) {
+        return;
+    }
 
+    String path = "/greenhouses/" + greenhouseId + "/devmode";
+    if (Firebase.getJSON(fbdo, path.c_str())) {
+        FirebaseJson *json = fbdo.jsonObjectPtr();
+        FirebaseJsonData result;
 
-
-
+        if (json->get(result, "analogRead")) analogRead = result.boolValue;
+        if (json->get(result, "boolean")) digitalWrite = result.boolValue;
+        if (json->get(result, "pin")) pin = result.intValue;
+        if (json->get(result, "pwm")) pwm = result.boolValue;
+        if (json->get(result, "pwmValue")) pwmValue = result.intValue;
+        
+        Serial.printf("[DEVMODE] Settings - AnalogRead: %d, DigitalWrite: %d, Pin: %d, PWM: %d, PWMValue: %d\n",
+                     analogRead, digitalWrite, pin, pwm, pwmValue);
+    } else {
+        Serial.println("[DEVMODE] ERRO - Falha ao ler configurações: " + fbdo.errorReason());
+    }
+}
