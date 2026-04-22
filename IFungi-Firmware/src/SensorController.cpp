@@ -149,7 +149,6 @@ void SensorController::begin() {
  * @see SensorController::begin()
  */
 void SensorController::update() {
-    // Verifica se passou intervalo mínimo desde última atualização
     if(millis() - lastUpdate >= 2000) {
         static unsigned int readCount = 0;
         
@@ -157,36 +156,100 @@ void SensorController::update() {
         // LEITURAS BÁSICAS (RÁPIDAS)
         // =====================================================================
         
-        light = analogRead(LDR_PIN);   // Luminosidade (LDR)
-        co = analogRead(MQ7_PIN);      // Monóxido de carbono (MQ-7)
+        light = analogRead(LDR_PIN);
+        co    = analogRead(MQ7_PIN);
         
         // =====================================================================
         // LEITURA DHT22 (TEMPERATURA E UMIDADE) - A CADA 2 CICLOS
         // =====================================================================
         
-        if(dhtOK && (readCount % 2 == 0)) {
-            temperature = dht.readTemperature();
-            humidity = dht.readHumidity();
-            
-            // Verifica validade das leituras
-            if (isnan(temperature) || isnan(humidity)) {
-                Serial.println("[SENSOR] DHT22: ERRO - Leitura inválida");
-                dhtOK = false; // Marca sensor como defeituoso
+        if(readCount % 2 == 0) {
+            if(dhtOK) {
+                float newTemp = dht.readTemperature();
+                float newHum  = dht.readHumidity();
+                
+                if (isnan(newTemp) || isnan(newHum)) {
+                    dhtFailCount++;
+                    Serial.printf("[SENSOR] DHT22: leitura inválida (%d/3 falhas consecutivas)\n", dhtFailCount);
+                    
+                    // CORREÇÃO: após 3 falhas consecutivas marca como inoperante,
+                    // mas agenda tentativa de recuperação em vez de falha permanente.
+                    if (dhtFailCount >= 3) {
+                        dhtOK = false;
+                        dhtRecoveryTime = millis();
+                        Serial.println("[SENSOR] DHT22: INOPERANTE — tentativa de recuperação em 30s");
+                    }
+                } else {
+                    temperature  = newTemp;
+                    humidity     = newHum;
+                    dhtFailCount = 0; // reseta contador em leitura bem-sucedida
+                }
+            } else {
+                // CORREÇÃO: tenta reinicializar o DHT22 após 30 segundos de inatividade.
+                // Evita que uma falha momentânea desative o sensor permanentemente
+                // até o próximo reboot.
+                if (millis() - dhtRecoveryTime >= 30000) {
+                    Serial.println("[SENSOR] DHT22: tentando recuperação...");
+                    dht.begin();
+                    delay(500);
+                    float testTemp = dht.readTemperature();
+                    float testHum  = dht.readHumidity();
+                    if (!isnan(testTemp) && !isnan(testHum)) {
+                        dhtOK        = true;
+                        dhtFailCount = 0;
+                        temperature  = testTemp;
+                        humidity     = testHum;
+                        Serial.println("[SENSOR] DHT22: RECUPERADO com sucesso");
+                    } else {
+                        dhtRecoveryTime = millis(); // agenda próxima tentativa
+                        Serial.println("[SENSOR] DHT22: recuperação falhou, nova tentativa em 30s");
+                    }
+                }
             }
         }
         
         // =====================================================================
-        // LEITURA CCS811 (CO2 E TVOCs) - A CADA 3 CICLOS  
+        // LEITURA CCS811 (CO2 E TVOCs) - A CADA 3 CICLOS
         // =====================================================================
         
-        if(ccsOK && (readCount % 3 == 0)) {
-            if (ccs.available()) {
-                if (!ccs.readData()) {
-                    co2 = ccs.geteCO2();   // CO2 equivalente
-                    tvocs = ccs.getTVOC(); // Compostos orgânicos voláteis
-                } else {
-                    Serial.println("[SENSOR] CCS811: ERRO - Falha na leitura");
-                    ccsOK = false; // Marca sensor como defeituoso
+        if(readCount % 3 == 0) {
+            if(ccsOK) {
+                if (ccs.available()) {
+                    if (!ccs.readData()) {
+                        co2          = ccs.geteCO2();
+                        tvocs        = ccs.getTVOC();
+                        ccsFailCount = 0; // reseta contador em leitura bem-sucedida
+                    } else {
+                        ccsFailCount++;
+                        Serial.printf("[SENSOR] CCS811: falha na leitura (%d/3 falhas consecutivas)\n", ccsFailCount);
+                        
+                        // CORREÇÃO: mesma lógica de recuperação do DHT22
+                        if (ccsFailCount >= 3) {
+                            ccsOK            = false;
+                            ccsRecoveryTime  = millis();
+                            Serial.println("[SENSOR] CCS811: INOPERANTE — tentativa de recuperação em 30s");
+                        }
+                    }
+                }
+            } else {
+                // Tenta reinicializar o CCS811 após 30 segundos
+                if (millis() - ccsRecoveryTime >= 30000) {
+                    Serial.println("[SENSOR] CCS811: tentando recuperação...");
+                    if (ccs.begin()) {
+                        unsigned long t = millis();
+                        while (!ccs.available() && millis() - t < 3000) delay(100);
+                        if (ccs.available()) {
+                            ccsOK            = true;
+                            ccsFailCount     = 0;
+                            Serial.println("[SENSOR] CCS811: RECUPERADO com sucesso");
+                        } else {
+                            ccsRecoveryTime = millis();
+                            Serial.println("[SENSOR] CCS811: recuperação falhou, nova tentativa em 30s");
+                        }
+                    } else {
+                        ccsRecoveryTime = millis();
+                        Serial.println("[SENSOR] CCS811: recuperação falhou, nova tentativa em 30s");
+                    }
                 }
             }
         }

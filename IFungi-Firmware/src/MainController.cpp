@@ -1,9 +1,9 @@
 /**
  * @file MainController.cpp
  * @brief Controlador principal do sistema IFungi Greenhouse
- * @author Seu Nome
- * @date 2024
- * @version 1.0
+ * @author Vinicius Alexandre Merlak
+ * @date 2026
+ * @version 1.1
  * 
  * @details Este arquivo implementa o controlador principal que gerencia todos os componentes
  * do sistema de estufa automatizada, incluindo sensores, atuadores, comunicação WiFi/Firebase,
@@ -18,6 +18,7 @@
 #include "SensorController.h"
 #include "ActuatorController.h"
 #include "QRCodeGenerator.h"
+#include "OTAHandler.h"         // ← OTA: inclusão do handler
 #include <WiFiManager.h>
 
 // =============================================================================
@@ -38,6 +39,12 @@ ActuatorController actuators;
 
 /// @brief Gerador de QR Code para identificação da estufa
 QRCodeGenerator qrGenerator;
+
+/// @brief Handler de atualização OTA remota
+OTAHandler otaHandler;                          // ← OTA: instância global
+
+/// @brief Versão atual do firmware — incremente a cada release
+const String FIRMWARE_VERSION = "1.0.0";       // ← OTA: versão atual
 
 /// @brief ID único da estufa baseado no MAC address
 String greenhouseID;
@@ -505,8 +512,8 @@ void setupWiFiAndFirebase() {
             firebaseAuthenticated = true;
             Serial.println("✅ Autenticação Firebase bem-sucedida!");
             
-            // Verifica e configura a estufa no Firebase
-            firebase.verifyGreenhouse();
+            // CORREÇÃO: verifyGreenhouse() já é chamado internamente por authenticate().
+            // A chamada duplicada aqui causava duas consultas Firebase desnecessárias no boot.
             
             // Envia dados locais pendentes
             firebase.sendLocalData();
@@ -855,6 +862,9 @@ void setup() {
     Serial.println("[SISTEMA] ID da Estufa: " + greenhouseID);
     qrGenerator.generateQRCode(greenhouseID);
 
+    // ← OTA: inicializa o handler após WiFi/Firebase estarem prontos
+    otaHandler.begin(&firebase, greenhouseID, FIRMWARE_VERSION, 60000);
+
     Serial.println("[SISTEMA] Sistema inicializado e pronto para operação");
 }
 
@@ -885,6 +895,7 @@ void loop() {
     handleHistoryAndLocalData();
     verifyConnectionStatus();
     handleDebugAndCalibration();
+    otaHandler.handle();    // ← OTA: verifica atualizações a cada 60s
     
     // Pequeno delay para estabilidade do sistema
     delay(10);

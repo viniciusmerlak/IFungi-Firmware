@@ -1,6 +1,7 @@
 #include "GreenhouseSystem.h"
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
+#include <ArduinoJson.h>   // necessário para desserializar registros NVS em sendLocalData
 
 String FirebaseHandler::getMacAddress() {
     return ::getMacAddress();
@@ -67,7 +68,8 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
     actuators.set("leds", leds);
     actuators.set("umidificador", humidifierOn);
 
-    json.set("lastUpdate", millis());
+    // CORREÇÃO: millis() substituído por timestamp Unix real (consistência com demais campos)
+    json.set("lastUpdate", (int)getCurrentTimestamp());
     json.set("atuadores", actuators);
 
     String path = FirebaseHandler::getGreenhousesPath() + greenhouseId;
@@ -191,35 +193,44 @@ void FirebaseHandler::saveDataLocally(float temp, float humidity, int co2, int c
     
     int numRecords = preferences.getInt("num_registros", 0);
     
+    // CORREÇÃO: O modelo anterior usava 7 chaves NVS por registro (temp_N, umid_N, etc.).
+    // Com MAX_RECORDS=50 isso resultava em 350 entradas, estourando o limite de ~100
+    // entradas por namespace do ESP32 — dados eram perdidos silenciosamente.
+    //
+    // Solução: cada registro é serializado como um único JSON numa chave "reg_N".
+    // 50 registros = 50 entradas + metadados → bem dentro do limite.
+    
     if (numRecords >= MAX_RECORDS) {
+        // Descarta o registro mais antigo (índice 0) deslocando todos
         for (int i = 1; i < MAX_RECORDS; i++) {
-            preferences.putFloat(("temp_" + String(i - 1)).c_str(), preferences.getFloat(("temp_" + String(i)).c_str(), 0));
-            preferences.putFloat(("umid_" + String(i - 1)).c_str(), preferences.getFloat(("umid_" + String(i)).c_str(), 0));
-            preferences.putInt(("co2_" + String(i - 1)).c_str(), preferences.getInt(("co2_" + String(i)).c_str(), 0));
-            preferences.putInt(("co_" + String(i - 1)).c_str(), preferences.getInt(("co_" + String(i)).c_str(), 0));
-            preferences.putInt(("lux_" + String(i - 1)).c_str(), preferences.getInt(("lux_" + String(i)).c_str(), 0));
-            preferences.putInt(("tvocs_" + String(i - 1)).c_str(), preferences.getInt(("tvocs_" + String(i)).c_str(), 0));
-            preferences.putULong(("timestamp_" + String(i - 1)).c_str(), preferences.getULong(("timestamp_" + String(i)).c_str(), 0));
+            String src = preferences.getString(("reg_" + String(i)).c_str(), "");
+            if (src.length() > 0) {
+                preferences.putString(("reg_" + String(i - 1)).c_str(), src.c_str());
+            }
         }
         numRecords = MAX_RECORDS - 1;
+        preferences.remove(("reg_" + String(numRecords)).c_str());
     }
     
-    int newIndex = numRecords;
-    preferences.putFloat(("temp_" + String(newIndex)).c_str(), temp);
-    preferences.putFloat(("umid_" + String(newIndex)).c_str(), humidity);
-    preferences.putInt(("co2_" + String(newIndex)).c_str(), co2);
-    preferences.putInt(("co_" + String(newIndex)).c_str(), co);
-    preferences.putInt(("lux_" + String(newIndex)).c_str(), lux);
-    preferences.putInt(("tvocs_" + String(newIndex)).c_str(), tvocs);
-    preferences.putULong(("timestamp_" + String(newIndex)).c_str(), timestamp);
-    
+    // Serializa o registro como JSON numa única chave
+    // Formato: {"t":temp,"h":humidity,"c2":co2,"co":co,"l":lux,"v":tvocs,"ts":timestamp}
+    // Chaves abreviadas para economizar espaço na NVS (limite de 64KB total)
+    String record = "{\"t\":"   + String(temp, 1)     +
+                    ",\"h\":"   + String(humidity, 1)  +
+                    ",\"c2\":"  + String(co2)           +
+                    ",\"co\":"  + String(co)            +
+                    ",\"l\":"   + String(lux)           +
+                    ",\"v\":"   + String(tvocs)         +
+                    ",\"ts\":"  + String(timestamp)     + "}";
+
+    preferences.putString(("reg_" + String(numRecords)).c_str(), record.c_str());
     preferences.putInt("num_registros", numRecords + 1);
     preferences.putULong("ultimo_timestamp", timestamp);
     
     preferences.end();
-    
-    Serial.println("Data saved locally. Record: " + String(newIndex));
+    Serial.printf("[NVS] Registro %d salvo localmente (%d bytes)\n", numRecords, record.length());
 }
+
 
 bool FirebaseHandler::initializeNVS() {
     if (nvsInitialized) return true;
@@ -264,71 +275,73 @@ void FirebaseHandler::sendLocalData() {
     }
     
     int numRecords = preferences.getInt("num_registros", 0);
-    Serial.println("Trying to send " + String(numRecords) + " local records");
-    
+    Serial.println("[NVS] Tentando enviar " + String(numRecords) + " registros locais");
     preferences.end();
-    
+
+    if (numRecords == 0) return;
+
+    // CORREÇÃO: leitura do novo formato de registro único por chave "reg_N"
+    // O formato antigo (temp_N, umid_N, etc.) foi substituído na saveDataLocally.
     if (!preferences.begin(NAMESPACE, false)) {
         Serial.println("Failed to open Preferences for writing");
         return;
     }
     
+    int sent = 0;
     for (int i = 0; i < numRecords; i++) {
-        float temp = preferences.getFloat(("temp_" + String(i)).c_str(), 0);
-        float humidity = preferences.getFloat(("umid_" + String(i)).c_str(), 0);
-        int co2 = preferences.getInt(("co2_" + String(i)).c_str(), 0);
-        int co = preferences.getInt(("co_" + String(i)).c_str(), 0);
-        int lux = preferences.getInt(("lux_" + String(i)).c_str(), 0);
-        int tvocs = preferences.getInt(("tvocs_" + String(i)).c_str(), 0);
-        unsigned long timestamp = preferences.getULong(("timestamp_" + String(i)).c_str(), 0);
-        
+        String keyName = "reg_" + String(i);
+        String record  = preferences.getString(keyName.c_str(), "");
+
+        if (record.length() == 0) continue;
+
+        // Desserializa o JSON compacto usando ArduinoJson
+        StaticJsonDocument<128> doc;
+        DeserializationError err = deserializeJson(doc, record);
+        if (err) {
+            Serial.printf("[NVS] Registro %d corrompido, descartando: %s\n", i, err.c_str());
+            preferences.remove(keyName.c_str());
+            continue;
+        }
+
+        float         temp      = doc["t"]  | 0.0f;
+        float         humidity  = doc["h"]  | 0.0f;
+        int           co2       = doc["c2"] | 0;
+        int           co        = doc["co"] | 0;
+        int           lux       = doc["l"]  | 0;
+        int           tvocs     = doc["v"]  | 0;
+
         if (Firebase.ready() && authenticated) {
             if (sendDataToHistory(temp, humidity, co2, co, lux, tvocs)) {
-                preferences.remove(("temp_" + String(i)).c_str());
-                preferences.remove(("umid_" + String(i)).c_str());
-                preferences.remove(("co2_" + String(i)).c_str());
-                preferences.remove(("co_" + String(i)).c_str());
-                preferences.remove(("lux_" + String(i)).c_str());
-                preferences.remove(("tvocs_" + String(i)).c_str());
-                preferences.remove(("timestamp_" + String(i)).c_str());
+                preferences.remove(keyName.c_str());
+                sent++;
             } else {
-                Serial.println("Failed to send record " + String(i) + ", stopping...");
+                Serial.println("[NVS] Falha ao enviar registro " + String(i) + ", interrompendo.");
                 break;
             }
         } else {
-            Serial.println("Firebase not available, stopping send...");
+            Serial.println("[NVS] Firebase indisponível, interrompendo envio.");
             break;
         }
     }
     
-    int newRecords = 0;
+    // Recompacta os registros restantes (remove lacunas dos enviados)
+    int newIndex = 0;
     for (int i = 0; i < numRecords; i++) {
-        if (preferences.isKey(("temp_" + String(i)).c_str())) {
-            if (i != newRecords) {
-                preferences.putFloat(("temp_" + String(newRecords)).c_str(), preferences.getFloat(("temp_" + String(i)).c_str(), 0));
-                preferences.putFloat(("umid_" + String(newRecords)).c_str(), preferences.getFloat(("umid_" + String(i)).c_str(), 0));
-                preferences.putInt(("co2_" + String(newRecords)).c_str(), preferences.getInt(("co2_" + String(i)).c_str(), 0));
-                preferences.putInt(("co_" + String(newRecords)).c_str(), preferences.getInt(("co_" + String(i)).c_str(), 0));
-                preferences.putInt(("lux_" + String(newRecords)).c_str(), preferences.getInt(("lux_" + String(i)).c_str(), 0));
-                preferences.putInt(("tvocs_" + String(newRecords)).c_str(), preferences.getInt(("tvocs_" + String(i)).c_str(), 0));
-                preferences.putULong(("timestamp_" + String(newRecords)).c_str(), preferences.getULong(("timestamp_" + String(i)).c_str(), 0));
-                
-                preferences.remove(("temp_" + String(i)).c_str());
-                preferences.remove(("umid_" + String(i)).c_str());
-                preferences.remove(("co2_" + String(i)).c_str());
-                preferences.remove(("co_" + String(i)).c_str());
-                preferences.remove(("lux_" + String(i)).c_str());
-                preferences.remove(("tvocs_" + String(i)).c_str());
-                preferences.remove(("timestamp_" + String(i)).c_str());
+        String keyName = "reg_" + String(i);
+        String record  = preferences.getString(keyName.c_str(), "");
+        if (record.length() > 0) {
+            if (i != newIndex) {
+                preferences.putString(("reg_" + String(newIndex)).c_str(), record.c_str());
+                preferences.remove(keyName.c_str());
             }
-            newRecords++;
+            newIndex++;
         }
     }
     
-    preferences.putInt("num_registros", newRecords);
+    preferences.putInt("num_registros", newIndex);
     preferences.end();
     
-    Serial.println("Local sends completed. Remaining: " + String(newRecords) + " records.");
+    Serial.printf("[NVS] Envio concluído: %d enviados, %d restantes.\n", sent, newIndex);
 }
 
 void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel) {
@@ -345,7 +358,8 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
     json.set("sensores/co", co);
     json.set("sensores/tvocs", tvocs);
     json.set("sensores/luminosidade", lux);
-    json.set("lastUpdate", millis());
+    // CORREÇÃO: millis() substituído por timestamp Unix real
+    json.set("lastUpdate", (int)getCurrentTimestamp());
     json.set("niveis/agua", waterLevel);
 
     String path = "/greenhouses/" + greenhouseId;
@@ -434,7 +448,9 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
 
     json.set("createdBy", creatorUser);
     json.set("currentUser", currentUser);
-    json.set("lastUpdate", (int)time(nullptr));
+    // CORREÇÃO: time(nullptr) pode retornar 0 se NTP não sincronizou ainda.
+    // getCurrentTimestamp() tem fallback para offset baseado em NVS.
+    json.set("lastUpdate", (int)getCurrentTimestamp());
 
     // 🔥 CORREÇÃO: Estrutura completa dos sensores
     FirebaseJson sensors;
@@ -486,7 +502,8 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     // 🔥 NOVO: Status do sistema
     FirebaseJson status;
     status.set("online", true);
-    status.set("lastHeartbeat", millis());
+    // CORREÇÃO: millis() substituído por timestamp Unix real
+    status.set("lastHeartbeat", (int)getCurrentTimestamp());
     status.set("ip", WiFi.localIP().toString());
     json.set("status", status);
 
@@ -518,7 +535,9 @@ void FirebaseHandler::sendHeartbeat() {
     
     FirebaseJson json;
     json.set("online", true);
-    json.set("lastHeartbeat", millis());
+    // CORREÇÃO: millis() retorna ms desde o boot, não um timestamp Unix.
+    // getCurrentTimestamp() usa NTP e retorna epoch real.
+    json.set("lastHeartbeat", (int)getCurrentTimestamp());
     json.set("ip", WiFi.localIP().toString());
     
     if (Firebase.updateNode(fbdo, path.c_str(), json)) {
@@ -716,41 +735,50 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         FirebaseJson *json = fbdo.jsonObjectPtr();
         FirebaseJsonData result;
         
+        // CORREÇÃO: cada campo é lido de forma independente.
+        // A lógica anterior acumulava erros com &= fazendo com que um único
+        // campo ausente zerasse todos os setpoints seguintes silenciosamente.
+        // Agora cada campo mantém seu valor atual caso não exista no Firebase.
         struct Setpoints {
-            int lux;
-            float tMax;
-            float tMin;
-            float uMax;
-            float uMin;
-            int coSp;
-            int co2Sp;
-            int tvocsSp;
+            int   lux     = 5000;
+            float tMax    = 30.0f;
+            float tMin    = 20.0f;
+            float uMax    = 80.0f;
+            float uMin    = 60.0f;
+            int   coSp    = 400;
+            int   co2Sp   = 400;
+            int   tvocsSp = 100;
         } setpoints;
 
-        bool success = true;
-        success &= json->get(result, "lux"); setpoints.lux = success ? result.intValue : 0;
-        success &= json->get(result, "tMax"); setpoints.tMax = success ? result.floatValue : 0;
-        success &= json->get(result, "tMin"); setpoints.tMin = success ? result.floatValue : 0;
-        success &= json->get(result, "uMax"); setpoints.uMax = success ? result.floatValue : 0;
-        success &= json->get(result, "uMin"); setpoints.uMin = success ? result.floatValue : 0;
-        success &= json->get(result, "coSp"); setpoints.coSp = success ? result.intValue : 0;
-        success &= json->get(result, "co2Sp"); setpoints.co2Sp = success ? result.intValue : 0;
-        success &= json->get(result, "tvocsSp"); setpoints.tvocsSp = success ? result.intValue : 0;
+        int fieldsRead = 0;
+        if (json->get(result, "lux"))     { setpoints.lux     = result.intValue;   fieldsRead++; }
+        if (json->get(result, "tMax"))    { setpoints.tMax    = result.floatValue; fieldsRead++; }
+        if (json->get(result, "tMin"))    { setpoints.tMin    = result.floatValue; fieldsRead++; }
+        if (json->get(result, "uMax"))    { setpoints.uMax    = result.floatValue; fieldsRead++; }
+        if (json->get(result, "uMin"))    { setpoints.uMin    = result.floatValue; fieldsRead++; }
+        if (json->get(result, "coSp"))    { setpoints.coSp    = result.intValue;   fieldsRead++; }
+        if (json->get(result, "co2Sp"))   { setpoints.co2Sp   = result.intValue;   fieldsRead++; }
+        if (json->get(result, "tvocsSp")) { setpoints.tvocsSp = result.intValue;   fieldsRead++; }
 
-        if (success) {
-            Serial.println("Setpoints received successfully:");
-            Serial.println("- Lux: " + String(setpoints.lux));
+        // Aplica sempre que pelo menos um campo foi lido com sucesso
+        if (fieldsRead > 0) {
+            Serial.printf("[FIREBASE] Setpoints recebidos (%d/8 campos):\n", fieldsRead);
+            Serial.println("- Lux: "      + String(setpoints.lux));
             Serial.println("- Temp Max: " + String(setpoints.tMax));
             Serial.println("- Temp Min: " + String(setpoints.tMin));
-            Serial.println("- Humidity Max: " + String(setpoints.uMax));
-            Serial.println("- Humidity Min: " + String(setpoints.uMin));
-            Serial.println("- TVOCs: " + String(setpoints.tvocsSp));
+            Serial.println("- Hum Max: "  + String(setpoints.uMax));
+            Serial.println("- Hum Min: "  + String(setpoints.uMin));
+            Serial.println("- TVOCs: "    + String(setpoints.tvocsSp));
 
-            actuators.applySetpoints(setpoints.lux, setpoints.tMin, setpoints.tMax, 
-                                setpoints.uMin, setpoints.uMax, setpoints.coSp, 
-                                setpoints.co2Sp, setpoints.tvocsSp);
+            actuators.applySetpoints(setpoints.lux, setpoints.tMin, setpoints.tMax,
+                                     setpoints.uMin, setpoints.uMax, setpoints.coSp,
+                                     setpoints.co2Sp, setpoints.tvocsSp);
+
+            if (fieldsRead < 8) {
+                Serial.printf("[FIREBASE] ⚠️ %d campo(s) ausentes — valores padrão mantidos para eles.\n", 8 - fieldsRead);
+            }
         } else {
-            Serial.println("Some setpoints not found in JSON");
+            Serial.println("[FIREBASE] ⚠️ Nenhum setpoint encontrado no JSON.");
         }
     } else {
         Serial.println("Error receiving setpoints: " + fbdo.errorReason());

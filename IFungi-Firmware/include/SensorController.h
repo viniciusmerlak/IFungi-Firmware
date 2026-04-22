@@ -30,6 +30,13 @@ private:
     bool ccsOK;
     unsigned long lastUpdate;
     
+    // CORREÇÃO: contadores e timers de recuperação automática dos sensores.
+    // Substituem o modelo de falha permanente (flag nunca resetada até reboot).
+    uint8_t       dhtFailCount    = 0;      ///< Falhas consecutivas do DHT22
+    uint8_t       ccsFailCount    = 0;      ///< Falhas consecutivas do CCS811
+    unsigned long dhtRecoveryTime = 0;      ///< Timestamp da última falha do DHT22
+    unsigned long ccsRecoveryTime = 0;      ///< Timestamp da última falha do CCS811
+    
     float temperature;
     float humidity;
     int co2;
