@@ -6,7 +6,7 @@
 #---------------------------------------------------------------------------
 
 PROJECT_NAME           = "IFungi Greenhouse"
-PROJECT_NUMBER         = 1.0
+PROJECT_NUMBER         = 1.1
 PROJECT_BRIEF          = "Sistema automatizado de controle de estufa"
 PROJECT_LOGO           = 
 OUTPUT_DIRECTORY       = ./docs

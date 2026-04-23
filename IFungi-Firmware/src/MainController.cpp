@@ -21,6 +21,25 @@
 #include "OTAHandler.h"         // ← OTA: inclusão do handler
 #include <WiFiManager.h>
 
+// Validação em tempo de compilação — abortam o build se o .env estiver incompleto
+#ifndef IFUNGI_WIFI_AP_NAME
+    #error "IFUNGI_WIFI_AP_NAME nao definida. Verifique seu arquivo .env"
+#endif
+#ifndef IFUNGI_WIFI_AP_PASSWORD
+    #error "IFUNGI_WIFI_AP_PASSWORD nao definida. Verifique seu arquivo .env"
+#endif
+#ifndef IFUNGI_FIREBASE_EMAIL
+    #error "IFUNGI_FIREBASE_EMAIL nao definida. Verifique seu arquivo .env"
+#endif
+#ifndef IFUNGI_FIREBASE_PASSWORD
+    #error "IFUNGI_FIREBASE_PASSWORD nao definida. Verifique seu arquivo .env"
+#endif
+#ifndef IFUNGI_OTA_PASSWORD
+    #error "IFUNGI_OTA_PASSWORD nao definida. Verifique seu arquivo .env"
+#endif
+
+
+
 // =============================================================================
 // VARIÁVEIS GLOBAIS DO SISTEMA
 // =============================================================================
@@ -407,8 +426,9 @@ void setupWiFiAndFirebase() {
     });
 
     // Parâmetros customizados para credenciais Firebase
-    WiFiManagerParameter custom_email("email", "Email Firebase", "", 40);
-    WiFiManagerParameter custom_password("password", "Senha Firebase", "", 40, "type=\"password\"");
+    // Placeholder usa o email do .env como sugestão no portal
+    WiFiManagerParameter custom_email("email", "Email Firebase", IFUNGI_FIREBASE_EMAIL, 40);
+    WiFiManagerParameter custom_password("password", "Senha Firebase", IFUNGI_FIREBASE_PASSWORD, 40, "type=\"password\"");
     
     wifiManager.addParameter(&custom_email);
     wifiManager.addParameter(&custom_password);
@@ -422,7 +442,8 @@ void setupWiFiAndFirebase() {
 
     // Loop de tentativas de conexão WiFi
     while (!wifiConnected && wifiAttempts < MAX_WIFI_ATTEMPTS) {
-        if (wifiManager.autoConnect("IFungi-Config", "config1234")) {
+        // AP name e senha do portal vêm do .env via IFUNGI_WIFI_AP_NAME / IFUNGI_WIFI_AP_PASSWORD
+        if (wifiManager.autoConnect(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD)) {
             wifiConnected = true;
             Serial.println("✅ WiFi conectado!");
             Serial.println("📡 IP: " + WiFi.localIP().toString());
@@ -508,6 +529,8 @@ void setupWiFiAndFirebase() {
         Serial.printf("🔐 Tentativa %d/%d de autenticação Firebase...\n", 
                      firebaseAttempts, MAX_FIREBASE_ATTEMPTS);
 
+        // Credenciais Firebase injetadas em build-time pelo .env
+        // Em runtime, podem ser sobrescritas pelo portal WiFiManager ou NVS
         if (firebase.authenticate(email, firebasePassword)) {
             firebaseAuthenticated = true;
             Serial.println("✅ Autenticação Firebase bem-sucedida!");

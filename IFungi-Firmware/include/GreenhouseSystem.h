@@ -63,8 +63,16 @@ private:
 
     FirebaseAuth auth;
     FirebaseConfig config;
-    const String FIREBASE_API_KEY = "AIzaSyDkPzzLHykaH16FsJpZYwaNkdTuOOmfnGE";
-    const String DATABASE_URL = "pfi-ifungi-default-rtdb.firebaseio.com";
+    // Credenciais injetadas em build-time via scripts/load_env.py (arquivo .env)
+    // O .env nunca entra no repositório — veja .gitignore e .env.example
+    #ifndef IFUNGI_FIREBASE_API_KEY
+        #error "IFUNGI_FIREBASE_API_KEY nao definida. Verifique seu arquivo .env"
+    #endif
+    #ifndef IFUNGI_FIREBASE_DB_URL
+        #error "IFUNGI_FIREBASE_DB_URL nao definida. Verifique seu arquivo .env"
+    #endif
+    const String FIREBASE_API_KEY = IFUNGI_FIREBASE_API_KEY;
+    const String DATABASE_URL     = IFUNGI_FIREBASE_DB_URL;
 
     bool initialized = false;
     unsigned long lastAuthAttempt = 0;

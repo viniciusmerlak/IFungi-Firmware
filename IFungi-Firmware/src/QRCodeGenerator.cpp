@@ -3,7 +3,7 @@
  * @brief Implementação do gerador de QR Code para identificação da estufa
  * @author Seu Nome
  * @date 2024
- * @version 1.0
+ * @version 1.1
  * 
  * @details Este arquivo implementa a geração de QR Codes para identificação
  * única da estufa, permitindo acesso rápido via dispositivos móveis.

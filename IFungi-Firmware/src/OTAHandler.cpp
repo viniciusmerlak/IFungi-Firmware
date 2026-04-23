@@ -32,6 +32,13 @@
 #include "OTAHandler.h"
 #include "GreenhouseSystem.h"   // FirebaseHandler está definido aqui
 
+// Validação em tempo de compilação
+#ifndef IFUNGI_OTA_PASSWORD
+    #error "IFUNGI_OTA_PASSWORD nao definida. Verifique seu arquivo .env"
+#endif
+
+
+
 // Inicialização do ponteiro estático (necessário para callback estático)
 OTAHandler* OTAHandler::_instance = nullptr;
 
