@@ -312,11 +312,24 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
     // =========================================================================
     // CONTROLE DE LUMINOSIDADE (LEDs)
     // =========================================================================
-    
-    int newIntensity = (light < luxSetpoint) ? 255 : 0;
-    
-    if (newIntensity != currentLEDIntensity) {
-        controlLEDs(newIntensity > 0, newIntensity);
+    //
+    // Prioridade:
+    //  1. ledScheduler ativo (timer ou solar) → scheduler decide intensidade
+    //  2. Scheduler inativo → lógica automática por LDR (comportamento original)
+    //
+    if (ledScheduler.isActive()) {
+        // O scheduler já foi atualizado em applyLEDSchedule() antes desta chamada.
+        // Aqui apenas aplicamos a decisão que ele calculou.
+        int schedIntensity = ledScheduler.wantsLEDsOn() ? ledScheduler.getIntensity() : 0;
+        if (schedIntensity != currentLEDIntensity) {
+            controlLEDs(schedIntensity > 0, schedIntensity);
+        }
+    } else {
+        // Modo automático clássico: compensa luminosidade abaixo do setpoint
+        int newIntensity = (light < luxSetpoint) ? 255 : 0;
+        if (newIntensity != currentLEDIntensity) {
+            controlLEDs(newIntensity > 0, newIntensity);
+        }
     }
     
     // =========================================================================
@@ -770,4 +783,29 @@ void ActuatorController::handleDevMode() {
     
     // Executa as operações do devmode
     executeDevModeOperations();
+}
+
+// =============================================================================
+// CONTROLE DO AGENDADOR DE LEDs
+// =============================================================================
+
+/**
+ * @brief Atualiza o LEDScheduler e aplica sua decisão nos LEDs
+ *
+ * @param ts Timestamp Unix atual (de getCurrentTimestamp())
+ *
+ * @details Deve ser chamado periodicamente no loop() principal.
+ *          Se o scheduler não estiver ativo, não faz nada.
+ *          Se o modo debug estiver ativo, o scheduler fica inativo internamente.
+ */
+void ActuatorController::applyLEDSchedule(unsigned long ts) {
+    ledScheduler.update(ts, debugMode);
+    // A decisão é aplicada dentro de controlAutomatically() via ledScheduler.isActive()
+    // Aqui forçamos a aplicação imediata caso controlAutomatically não tenha rodado ainda
+    if (ledScheduler.isActive() && !debugMode) {
+        int schedIntensity = ledScheduler.wantsLEDsOn() ? ledScheduler.getIntensity() : 0;
+        if (schedIntensity != currentLEDIntensity) {
+            controlLEDs(schedIntensity > 0, schedIntensity);
+        }
+    }
 }

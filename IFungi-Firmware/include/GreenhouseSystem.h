@@ -53,10 +53,21 @@ public:
     bool isAuthenticated() const { return authenticated; }
     bool isFirebaseReady() const { return Firebase.ready(); }
 
-    // 🔥 NOVAS FUNÇÕES PARA DEBUG E CALIBRAÇÃO
+    // Debug e calibração
     bool getDebugMode();
     void getManualActuatorStates(bool& relay1, bool& relay2, bool& relay3, bool& relay4, bool& ledsOn, int& ledsIntensity, bool& humidifierOn);
     void getDevModeSettings(bool& analogRead, bool& digitalWrite, int& pin, bool& pwm, int& pwmValue);
+
+    // Agendador de LEDs — lê /led_schedule do RTDB
+    void receiveLEDSchedule(class ActuatorController& actuators);
+
+    // OTA via RTDB — URL do .bin armazenada diretamente no banco
+    // Compatível com o OTAHandler existente; este método apenas popula o nó OTA
+    // se o campo url não for Storage, permitindo usar URLs diretas (GitHub Releases, etc.)
+    void ensureOTANodeExists();
+
+    // Auto-repair: regenera campos ausentes sem recriar o banco inteiro
+    void repairMissingFields();
 
 private:
     String getMacAddress();

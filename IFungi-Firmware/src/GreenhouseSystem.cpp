@@ -619,7 +619,16 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         "lastUpdate",
         "status",
         "status/online",
-        "status/lastHeartbeat"
+        "status/lastHeartbeat",
+        // Agendador de LEDs
+        "led_schedule",
+        "led_schedule/scheduleEnabled",
+        "led_schedule/solarSimEnabled",
+        "led_schedule/onHour",
+        "led_schedule/offHour",
+        "led_schedule/intensity",
+        // Nó OTA
+        "ota"
     };
     
     const int numFields = sizeof(requiredFields) / sizeof(requiredFields[0]);
@@ -688,6 +697,33 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         needsUpdate = true;
     }
     
+    // Verifica e cria led_schedule se não existir
+    if (!jsonPtr->get(result, "led_schedule")) {
+        Serial.println("⚠️ led_schedule missing, creating...");
+        FirebaseJson ledSched;
+        ledSched.set("scheduleEnabled", false);
+        ledSched.set("solarSimEnabled", false);
+        ledSched.set("onHour",          6);
+        ledSched.set("onMinute",        0);
+        ledSched.set("offHour",        20);
+        ledSched.set("offMinute",       0);
+        ledSched.set("intensity",      255);
+        updateJson.set("led_schedule", ledSched);
+        needsUpdate = true;
+    }
+
+    // Verifica e cria nó OTA se não existir
+    if (!jsonPtr->get(result, "ota")) {
+        Serial.println("⚠️ ota node missing, creating...");
+        FirebaseJson otaNode;
+        otaNode.set("available", false);
+        otaNode.set("version",   "");
+        otaNode.set("url",       "");
+        otaNode.set("notes",     "");
+        updateJson.set("ota", otaNode);
+        needsUpdate = true;
+    }
+
     // Se faltam campos, atualiza a estufa no Firebase
     if (needsUpdate) {
         Serial.println("🔄 Completing greenhouse structure with missing fields...");
@@ -863,5 +899,186 @@ void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWrite, i
                      analogRead, digitalWrite, pin, pwm, pwmValue);
     } else {
         Serial.println("[DEVMODE] ERRO - Falha ao ler configurações: " + fbdo.errorReason());
+    }
+}
+
+// =============================================================================
+// AGENDADOR DE LEDs — lê /led_schedule do Firebase RTDB
+// =============================================================================
+
+/**
+ * @brief Lê a configuração do agendador de LEDs do Firebase e aplica no ActuatorController
+ *
+ * @details Lê o nó /greenhouses/<ID>/led_schedule e popula o LEDScheduler.
+ * Chamada pelo handleFirebase() em MainController a cada FIREBASE_UPDATE_INTERVAL.
+ *
+ * Campos lidos:
+ *  - scheduleEnabled (bool)  → ativa modo timer
+ *  - solarSimEnabled (bool)  → ativa simulação solar (sobrepõe timer)
+ *  - onHour  / onMinute  (int) → horário de início
+ *  - offHour / offMinute (int) → horário de fim
+ *  - intensity (int 0-255)   → intensidade no modo timer
+ */
+void FirebaseHandler::receiveLEDSchedule(ActuatorController& actuators) {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/led_schedule";
+    if (!Firebase.getJSON(fbdo, path.c_str())) {
+        Serial.println("[LED_SCHED] Falha ao ler led_schedule: " + fbdo.errorReason());
+        return;
+    }
+
+    FirebaseJson*    json   = fbdo.jsonObjectPtr();
+    FirebaseJsonData result;
+
+    if (json->get(result, "scheduleEnabled")) actuators.ledScheduler.scheduleEnabled = result.boolValue;
+    if (json->get(result, "solarSimEnabled")) actuators.ledScheduler.solarSimEnabled = result.boolValue;
+    if (json->get(result, "onHour"))          actuators.ledScheduler.onHour          = result.intValue;
+    if (json->get(result, "onMinute"))        actuators.ledScheduler.onMinute        = result.intValue;
+    if (json->get(result, "offHour"))         actuators.ledScheduler.offHour         = result.intValue;
+    if (json->get(result, "offMinute"))       actuators.ledScheduler.offMinute       = result.intValue;
+    if (json->get(result, "intensity"))       actuators.ledScheduler.configIntensity = result.intValue;
+
+    Serial.printf("[LED_SCHED] Config: schedule=%d solar=%d on=%02d:%02d off=%02d:%02d int=%d\n",
+                  actuators.ledScheduler.scheduleEnabled,
+                  actuators.ledScheduler.solarSimEnabled,
+                  actuators.ledScheduler.onHour,
+                  actuators.ledScheduler.onMinute,
+                  actuators.ledScheduler.offHour,
+                  actuators.ledScheduler.offMinute,
+                  actuators.ledScheduler.configIntensity);
+}
+
+// =============================================================================
+// OTA — garante que o nó existe no RTDB (URL direta, sem Firebase Storage)
+// =============================================================================
+
+/**
+ * @brief Garante que o nó /ota/ existe no RTDB com estrutura mínima
+ *
+ * @details O OTAHandler verifica /ota/available, /ota/version e /ota/url.
+ * Esta função cria o nó se ele não existir, permitindo que a URL do .bin
+ * seja inserida diretamente no RTDB sem depender do Firebase Storage.
+ *
+ * Fontes válidas de URL:
+ *  - Firebase Storage:  https://firebasestorage.googleapis.com/...
+ *  - GitHub Releases:   https://github.com/.../releases/download/v1.1.0/firmware.bin
+ *  - Qualquer HTTPS:    qualquer servidor acessível pelo ESP32
+ */
+void FirebaseHandler::ensureOTANodeExists() {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/ota/available";
+    if (Firebase.getBool(fbdo, path.c_str())) {
+        return; // Nó já existe
+    }
+
+    Serial.println("[OTA] Nó OTA não encontrado, criando estrutura...");
+
+    String basePath = "/greenhouses/" + greenhouseId + "/ota";
+    FirebaseJson otaNode;
+    otaNode.set("available", false);
+    otaNode.set("version",   "");
+    otaNode.set("url",       "");
+    otaNode.set("notes",     "Insira a URL do .bin e mude available para true");
+
+    if (Firebase.setJSON(fbdo, basePath.c_str(), otaNode)) {
+        Serial.println("[OTA] ✅ Nó OTA criado no RTDB");
+    } else {
+        Serial.println("[OTA] ❌ Falha ao criar nó OTA: " + fbdo.errorReason());
+    }
+}
+
+// =============================================================================
+// AUTO-REPAIR — regenera campos ausentes sem recriar o banco inteiro
+// =============================================================================
+
+/**
+ * @brief Verifica e regenera apenas os campos ausentes no RTDB
+ *
+ * @details Mais leve que isGreenhouseStructureComplete: não baixa o JSON inteiro.
+ * Verifica campo a campo com Firebase.get() e adiciona apenas o que falta.
+ * Ideal para chamada periódica (ex: a cada 5 minutos).
+ *
+ * Cobre:
+ *  - Todos os setpoints
+ *  - led_schedule completo
+ *  - Nó OTA
+ *  - debug_mode, manual_actuators, devmode
+ */
+void FirebaseHandler::repairMissingFields() {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String base  = "/greenhouses/" + greenhouseId;
+    bool   dirty = false;
+    FirebaseJson patch;
+
+    // ── setpoints ────────────────────────────────────────────────────────────
+    struct { const char* key; float defVal; bool isFloat; } spFields[] = {
+        {"setpoints/lux",     5000, false},
+        {"setpoints/tMax",    30.0, true },
+        {"setpoints/tMin",    20.0, true },
+        {"setpoints/uMax",    80.0, true },
+        {"setpoints/uMin",    60.0, true },
+        {"setpoints/coSp",   400,   false},
+        {"setpoints/co2Sp",  400,   false},
+        {"setpoints/tvocsSp",100,   false},
+    };
+    for (auto& f : spFields) {
+        if (!Firebase.get(fbdo, (base + "/" + f.key).c_str()) ||
+            fbdo.dataType() == "null") {
+            if (f.isFloat) patch.set(f.key, f.defVal);
+            else            patch.set(f.key, (int)f.defVal);
+            dirty = true;
+            Serial.printf("[REPAIR] ⚠️ Campo ausente: %s\n", f.key);
+        }
+    }
+
+    // ── led_schedule ─────────────────────────────────────────────────────────
+    if (!Firebase.get(fbdo, (base + "/led_schedule").c_str()) ||
+        fbdo.dataType() == "null") {
+        FirebaseJson ls;
+        ls.set("scheduleEnabled", false);
+        ls.set("solarSimEnabled", false);
+        ls.set("onHour",    6);
+        ls.set("onMinute",  0);
+        ls.set("offHour",  20);
+        ls.set("offMinute", 0);
+        ls.set("intensity",255);
+        patch.set("led_schedule", ls);
+        dirty = true;
+        Serial.println("[REPAIR] ⚠️ Campo ausente: led_schedule");
+    }
+
+    // ── ota ──────────────────────────────────────────────────────────────────
+    if (!Firebase.get(fbdo, (base + "/ota").c_str()) ||
+        fbdo.dataType() == "null") {
+        FirebaseJson ota;
+        ota.set("available", false);
+        ota.set("version",   "");
+        ota.set("url",       "");
+        ota.set("notes",     "");
+        patch.set("ota", ota);
+        dirty = true;
+        Serial.println("[REPAIR] ⚠️ Campo ausente: ota");
+    }
+
+    // ── debug_mode ───────────────────────────────────────────────────────────
+    if (!Firebase.get(fbdo, (base + "/debug_mode").c_str()) ||
+        fbdo.dataType() == "null") {
+        patch.set("debug_mode", false);
+        dirty = true;
+        Serial.println("[REPAIR] ⚠️ Campo ausente: debug_mode");
+    }
+
+    // ── Aplica patch ─────────────────────────────────────────────────────────
+    if (dirty) {
+        if (Firebase.updateNode(fbdo, base.c_str(), patch)) {
+            Serial.println("[REPAIR] ✅ Campos ausentes restaurados com sucesso");
+        } else {
+            Serial.println("[REPAIR] ❌ Falha ao restaurar campos: " + fbdo.errorReason());
+        }
+    } else {
+        Serial.println("[REPAIR] ✅ Estrutura do banco íntegra");
     }
 }

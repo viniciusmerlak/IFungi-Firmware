@@ -19,6 +19,7 @@
 #include "ActuatorController.h"
 #include "QRCodeGenerator.h"
 #include "OTAHandler.h"         // ← OTA: inclusão do handler
+#include "LEDScheduler.h"
 #include <WiFiManager.h>
 
 // Validação em tempo de compilação — abortam o build se o .env estiver incompleto
@@ -27,12 +28,6 @@
 #endif
 #ifndef IFUNGI_WIFI_AP_PASSWORD
     #error "IFUNGI_WIFI_AP_PASSWORD nao definida. Verifique seu arquivo .env"
-#endif
-#ifndef IFUNGI_FIREBASE_EMAIL
-    #error "IFUNGI_FIREBASE_EMAIL nao definida. Verifique seu arquivo .env"
-#endif
-#ifndef IFUNGI_FIREBASE_PASSWORD
-    #error "IFUNGI_FIREBASE_PASSWORD nao definida. Verifique seu arquivo .env"
 #endif
 #ifndef IFUNGI_OTA_PASSWORD
     #error "IFUNGI_OTA_PASSWORD nao definida. Verifique seu arquivo .env"
@@ -89,6 +84,15 @@ unsigned long lastHistoryUpdate = 0;
 
 /// @brief Timestamp do último salvamento local
 unsigned long lastLocalSave = 0;
+
+/// @brief Timestamp do último auto-repair do banco Firebase
+unsigned long lastRepairCheck = 0;
+
+/**
+ * @def REPAIR_CHECK_INTERVAL
+ * @brief Intervalo para verificação de integridade do banco (5 minutos)
+ */
+const unsigned long REPAIR_CHECK_INTERVAL = 300000;
 
 /**
  * @def SENSOR_READ_INTERVAL
@@ -426,9 +430,10 @@ void setupWiFiAndFirebase() {
     });
 
     // Parâmetros customizados para credenciais Firebase
-    // Placeholder usa o email do .env como sugestão no portal
-    WiFiManagerParameter custom_email("email", "Email Firebase", IFUNGI_FIREBASE_EMAIL, 40);
-    WiFiManagerParameter custom_password("password", "Senha Firebase", IFUNGI_FIREBASE_PASSWORD, 40, "type=\"password\"");
+    // Campos vazios — o usuário preenche no portal da rede cativa
+    // Credenciais de runtime NUNCA devem ser hardcoded no firmware
+    WiFiManagerParameter custom_email("email", "Email Firebase", "", 40);
+    WiFiManagerParameter custom_password("password", "Senha Firebase", "", 40, "type=\"password\"");
     
     wifiManager.addParameter(&custom_email);
     wifiManager.addParameter(&custom_password);
@@ -447,6 +452,13 @@ void setupWiFiAndFirebase() {
             wifiConnected = true;
             Serial.println("✅ WiFi conectado!");
             Serial.println("📡 IP: " + WiFi.localIP().toString());
+
+            // Força DNS confiável do Google — evita falha de resolução
+            // de www.googleapis.com que impede autenticação Firebase
+            WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
+                        IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
+            Serial.println("🌐 DNS: 8.8.8.8 / 8.8.4.4 configurado");
+            delay(200); // aguarda stack de rede aplicar o novo DNS
             break;
         } else {
             wifiAttempts++;
@@ -535,8 +547,9 @@ void setupWiFiAndFirebase() {
             firebaseAuthenticated = true;
             Serial.println("✅ Autenticação Firebase bem-sucedida!");
             
-            // CORREÇÃO: verifyGreenhouse() já é chamado internamente por authenticate().
-            // A chamada duplicada aqui causava duas consultas Firebase desnecessárias no boot.
+            // verifyGreenhouse() já é chamado internamente por authenticate().
+            // Garante que o nó OTA existe (sem Firebase Storage)
+            firebase.ensureOTANodeExists();
             
             // Envia dados locais pendentes
             firebase.sendLocalData();
@@ -755,6 +768,9 @@ void handleSensors() {
  */
 void handleActuators() {
     if (millis() - lastActuatorControl > ACTUATOR_CONTROL_INTERVAL) {
+        // Atualiza o scheduler de LEDs com o timestamp atual
+        actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
+
         actuators.controlAutomatically(
             sensors.getTemperature(),
             sensors.getHumidity(),
@@ -810,6 +826,9 @@ void handleFirebase() {
         
         // Recebe setpoints e comandos do Firebase
         firebase.receiveSetpoints(actuators);
+
+        // Recebe configuração do agendador de LEDs
+        firebase.receiveLEDSchedule(actuators);
         
         lastFirebaseUpdate = millis();
     }
@@ -843,6 +862,26 @@ void handleHistoryAndLocalData() {
             saveDataLocally();
         }
         lastLocalSave = millis();
+    }
+}
+
+// =============================================================================
+// AUTO-REPAIR DO BANCO FIREBASE
+// =============================================================================
+
+/**
+ * @brief Verifica e regenera campos ausentes no Firebase periodicamente
+ *
+ * @details Roda a cada 5 minutos. Mais leve que recriar o banco — só
+ * adiciona o que estiver faltando (setpoints, led_schedule, ota, etc.)
+ */
+void handleRepairAndOTA() {
+    if (!firebase.isAuthenticated() || WiFi.status() != WL_CONNECTED) return;
+
+    if (millis() - lastRepairCheck > REPAIR_CHECK_INTERVAL) {
+        lastRepairCheck = millis();
+        firebase.repairMissingFields();
+        firebase.ensureOTANodeExists();
     }
 }
 
@@ -919,6 +958,7 @@ void loop() {
     verifyConnectionStatus();
     handleDebugAndCalibration();
     otaHandler.handle();    // ← OTA: verifica atualizações a cada 60s
+    handleRepairAndOTA();   // ← verifica integridade do banco a cada 5min
     
     // Pequeno delay para estabilidade do sistema
     delay(10);

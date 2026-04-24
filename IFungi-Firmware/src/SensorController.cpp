@@ -3,7 +3,7 @@
  * @brief Implementação do controlador de sensores ambientais
  * @author Seu Nome  
  * @date 2024
- * @version 1.1
+ * @version 1.0
  * 
  * @details Este arquivo implementa o controlador responsável pela leitura
  * e gerenciamento de todos os sensores do sistema:

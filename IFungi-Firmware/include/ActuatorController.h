@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include "GreenhouseSystem.h"
 #include <ESP32Servo.h>
+#include "LEDScheduler.h"
 
 // Forward declaration para evitar dependência circular
 class FirebaseHandler;
@@ -65,6 +66,10 @@ public:
     // Controle de escrita no Firebase
     void setFirebaseWriteBlock(bool block);
     bool canWriteToFirebase();
+
+    // Agendador de LEDs (timer e simulação solar)
+    LEDScheduler ledScheduler;                  ///< Instância pública — lida pelo Firebase
+    void applyLEDSchedule(unsigned long ts);    ///< Aplica decisão do scheduler nos LEDs
 
     // Métodos para modo de desenvolvimento
     void setDevModeSettings(bool analogRead, bool digitalWrite, int pin, bool pwm, int pwmValue);
