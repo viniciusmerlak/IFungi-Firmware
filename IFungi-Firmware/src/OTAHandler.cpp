@@ -1,7 +1,7 @@
 /**
  * @file OTAHandler.cpp
  * @brief Implementação do controlador OTA para o sistema IFungi Greenhouse
- * @version 1.0
+ * @version 1.1
  * @date 2026
  *
  * @details Fluxo completo de atualização:
@@ -22,7 +22,17 @@
  *    |                                     |
  *  [FAILED]                         ESP.restart()
  *
- * @note A biblioteca Update.h (já incluída no ESP32 Arduino Core) cuida de:
+ * SEGURANÇA:
+ *  - Apenas URLs com prefixo "https://" são aceitas. HTTP puro é rejeitado
+ *    porque permitiria um atacante na rede local servir firmware malicioso
+ *    (man-in-the-middle). O ESP32 já tem suporte TLS nativo — não há motivo
+ *    para aceitar conexões não cifradas durante um update de firmware.
+ *  - client.setInsecure() não valida o certificado CA do servidor, mas ainda
+ *    garante criptografia TLS. Para validação completa, use setCACert() com
+ *    o certificado raiz do servidor de storage (ex: ISRG Root X1 para Let's
+ *    Encrypt, ou DigiCert Global Root CA para Firebase Storage).
+ *
+ * @note A biblioteca Update.h (incluída no ESP32 Arduino Core) cuida de:
  *   - Selecionar a partição OTA inativa automaticamente
  *   - Validar o cabeçalho do binário ESP32
  *   - Marcar a partição como boot ativa após sucesso
@@ -32,12 +42,9 @@
 #include "OTAHandler.h"
 #include "GreenhouseSystem.h"   // FirebaseHandler está definido aqui
 
-// Validação em tempo de compilação
 #ifndef IFUNGI_OTA_PASSWORD
     #error "IFUNGI_OTA_PASSWORD nao definida. Verifique seu arquivo .env"
 #endif
-
-
 
 // Inicialização do ponteiro estático (necessário para callback estático)
 OTAHandler* OTAHandler::_instance = nullptr;
@@ -46,9 +53,6 @@ OTAHandler* OTAHandler::_instance = nullptr;
 // INICIALIZAÇÃO
 // =============================================================================
 
-/**
- * @brief Inicializa o OTAHandler com as dependências do sistema
- */
 void OTAHandler::begin(FirebaseHandler* firebaseHandler,
                        const String& greenhouseId,
                        const String& currentVersion,
@@ -69,14 +73,9 @@ void OTAHandler::begin(FirebaseHandler* firebaseHandler,
 // LOOP PRINCIPAL
 // =============================================================================
 
-/**
- * @brief Gerencia o ciclo OTA — deve ser chamado no loop() principal
- */
 void OTAHandler::handle() {
-    // Só opera com WiFi e Firebase ativos
     if (WiFi.status() != WL_CONNECTED) return;
     if (_firebase == nullptr || !_firebase->isAuthenticated()) return;
-    // Não re-entra durante download/escrita
     if (isUpdating()) return;
 
     bool timeToCheck = (millis() - _lastCheck >= _checkInterval);
@@ -94,8 +93,7 @@ void OTAHandler::handle() {
             Serial.println("[OTA] Iniciando download...");
 
             if (_downloadAndInstall(_pendingUrl)) {
-                // _downloadAndInstall chama ESP.restart() internamente após sucesso
-                // Este ponto nunca é alcançado em caso de sucesso
+                // ESP.restart() chamado internamente — nunca chega aqui em sucesso
             } else {
                 Serial.println("[OTA] ❌ Falha na instalação. Sistema continua operando normalmente.");
                 _reportResult(false);
@@ -107,9 +105,6 @@ void OTAHandler::handle() {
     }
 }
 
-/**
- * @brief Força verificação imediata na próxima chamada de handle()
- */
 void OTAHandler::checkNow() {
     _forceCheck = true;
     Serial.println("[OTA] Verificação imediata agendada.");
@@ -119,24 +114,10 @@ void OTAHandler::checkNow() {
 // VERIFICAÇÃO NO FIREBASE
 // =============================================================================
 
-/**
- * @brief Consulta o nó /greenhouses/<ID>/ota/ no Firebase RTDB
- *
- * @details Lê os campos:
- *  - available (bool): indica se há atualização
- *  - version   (String): versão do novo firmware
- *  - url       (String): URL HTTPS do arquivo .bin
- *
- * @return true se available=true E version != versão atual
- */
 bool OTAHandler::_checkForUpdate() {
     String basePath = "/greenhouses/" + _greenhouseId + "/ota/";
 
-    // -------------------------------------------------------------------------
-    // Lê o campo "available"
-    // -------------------------------------------------------------------------
     if (!Firebase.getBool(_firebase->fbdo, basePath + "available")) {
-        // Nó pode não existir ainda — não é erro crítico
         Serial.println("[OTA] Nó OTA não encontrado no Firebase (normal na primeira execução).");
         return false;
     }
@@ -147,25 +128,18 @@ bool OTAHandler::_checkForUpdate() {
         return false;
     }
 
-    // -------------------------------------------------------------------------
-    // Lê a versão alvo
-    // -------------------------------------------------------------------------
     if (!Firebase.getString(_firebase->fbdo, basePath + "version")) {
         Serial.println("[OTA] ⚠️ Campo 'version' não encontrado no nó OTA.");
         return false;
     }
     _pendingVersion = _firebase->fbdo.stringData();
 
-    // Evita re-instalação da versão já em execução
     if (_pendingVersion == _currentVersion) {
         Serial.printf("[OTA] Versão %s já instalada. Limpando flag...\n", _currentVersion.c_str());
         Firebase.setBool(_firebase->fbdo, basePath + "available", false);
         return false;
     }
 
-    // -------------------------------------------------------------------------
-    // Lê a URL do binário
-    // -------------------------------------------------------------------------
     if (!Firebase.getString(_firebase->fbdo, basePath + "url")) {
         Serial.println("[OTA] ⚠️ Campo 'url' não encontrado no nó OTA.");
         return false;
@@ -174,6 +148,22 @@ bool OTAHandler::_checkForUpdate() {
 
     if (_pendingUrl.length() == 0) {
         Serial.println("[OTA] ⚠️ URL vazia no nó OTA.");
+        return false;
+    }
+
+    // SEGURANÇA: rejeita qualquer URL que não use HTTPS.
+    // Um firmware enviado via HTTP puro pode ser interceptado e substituído
+    // por um atacante na mesma rede (MITM). O ESP32 suporta TLS — não há
+    // justificativa para aceitar HTTP em atualizações de firmware.
+    if (!_pendingUrl.startsWith("https://")) {
+        Serial.println("[OTA] ❌ SEGURANÇA: URL rejeitada — deve começar com 'https://'");
+        Serial.println("[OTA]    URL recebida: " + _pendingUrl.substring(0, 40) + "...");
+        // Limpa o campo de URL inválida e desativa a flag para não repetir
+        Firebase.setString(_firebase->fbdo, basePath + "url", "");
+        Firebase.setBool(_firebase->fbdo, basePath + "available", false);
+        Firebase.setString(_firebase->fbdo, basePath + "lastError",
+                           "URL rejeitada: deve ser HTTPS. Recebido: " +
+                           _pendingUrl.substring(0, 40));
         return false;
     }
 
@@ -192,10 +182,18 @@ bool OTAHandler::_checkForUpdate() {
  * diretamente na flash.
  *
  * Proteções implementadas:
+ *  - Apenas URLs HTTPS são aceitas (verificado em _checkForUpdate)
  *  - Timeout de 30s no HTTP
  *  - Validação do Content-Length antes de iniciar
- *  - Verifica cabeçalho mágico do binário ESP32 (0xE9)
+ *  - Verifica cabeçalho mágico do binário ESP32 (0xE9) via Update.h
  *  - Rollback automático pelo Update.h se a escrita falhar
+ *
+ * NOTA SOBRE client.setInsecure():
+ *  Desativa verificação do certificado CA — garante criptografia TLS mas
+ *  não autentica a identidade do servidor. Para autenticação completa,
+ *  use client.setCACert(root_ca) com o certificado raiz do servidor.
+ *  Em ambientes controlados (rede interna + URL conhecida), setInsecure()
+ *  é aceitável. Em produção com URLs públicas, prefira setCACert().
  *
  * @param url URL HTTPS completa do arquivo .bin
  * @return true em caso de sucesso (seguido de reboot), false em falha
@@ -207,17 +205,13 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     HTTPClient http;
     WiFiClientSecure client;
 
-    // Sem verificação de certificado CA para simplicidade.
-    // Em produção, considere usar setCACert() com o certificado da Google/Firebase.
-    client.setInsecure();
+    client.setInsecure(); // veja nota no header desta função
 
     Serial.println("[OTA] Conectando ao servidor...");
-    Serial.println("[OTA] URL: " + url);
+    Serial.println("[OTA] URL: " + url.substring(0, 60) + (url.length() > 60 ? "..." : ""));
 
     http.begin(client, url);
-    http.setTimeout(30000); // 30 segundos de timeout
-
-    // Segue redirecionamentos HTTP (necessário para URLs do Firebase Storage)
+    http.setTimeout(30000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
     int httpCode = http.GET();
@@ -228,7 +222,6 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
         return false;
     }
 
-    // Obtém tamanho do arquivo
     int contentLength = http.getSize();
 
     if (contentLength <= 0) {
@@ -240,10 +233,6 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     Serial.printf("[OTA] Tamanho do firmware: %d bytes (%.1f KB)\n",
                   contentLength, contentLength / 1024.0f);
 
-    // -------------------------------------------------------------------------
-    // Inicia o processo de escrita OTA
-    // Update.UPDATE_FIRMWARE = seleciona partição de app (não SPIFFS)
-    // -------------------------------------------------------------------------
     if (!Update.begin(contentLength, U_FLASH)) {
         Serial.printf("[OTA] ❌ Erro ao iniciar Update: ");
         Update.printError(Serial);
@@ -251,14 +240,10 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
         return false;
     }
 
-    // Registra callback de progresso
     Update.onProgress(_onProgress);
 
     _status = WRITING;
 
-    // -------------------------------------------------------------------------
-    // Stream: lê em blocos de 1KB e escreve na flash
-    // -------------------------------------------------------------------------
     WiFiClient* stream = http.getStreamPtr();
     const size_t BUFFER_SIZE = 1024;
     uint8_t buffer[BUFFER_SIZE];
@@ -267,7 +252,6 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     Serial.println("[OTA] Gravando firmware na flash...");
 
     while (http.connected() && written < (size_t)contentLength) {
-        // Aguarda dados disponíveis (timeout 5s)
         unsigned long waitStart = millis();
         while (stream->available() == 0) {
             if (millis() - waitStart > 5000) {
@@ -299,9 +283,6 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
 
     http.end();
 
-    // -------------------------------------------------------------------------
-    // Finaliza e valida a imagem gravada
-    // -------------------------------------------------------------------------
     if (!Update.end(true)) {
         Serial.print("[OTA] ❌ Falha na finalização: ");
         Update.printError(Serial);
@@ -313,9 +294,6 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
         return false;
     }
 
-    // -------------------------------------------------------------------------
-    // Sucesso — reporta ao Firebase e reinicia
-    // -------------------------------------------------------------------------
     Serial.println("\n[OTA] ✅ Firmware gravado com sucesso!");
     Serial.printf("[OTA] %u bytes escritos de %d\n", written, contentLength);
 
@@ -333,18 +311,12 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
 // CALLBACK DE PROGRESSO
 // =============================================================================
 
-/**
- * @brief Callback estático chamado pelo Update.h durante a escrita
- * @param progress Bytes gravados até o momento
- * @param total Total de bytes a gravar
- */
 void OTAHandler::_onProgress(size_t progress, size_t total) {
     if (_instance == nullptr || total == 0) return;
 
     int percent = (int)((progress * 100) / total);
     _instance->_progress = percent;
 
-    // Imprime barra de progresso a cada 10%
     if (percent % 10 == 0) {
         Serial.printf("[OTA] Progresso: [");
         for (int i = 0; i < 10; i++) {
@@ -358,33 +330,19 @@ void OTAHandler::_onProgress(size_t progress, size_t total) {
 // RELATÓRIO DE RESULTADO NO FIREBASE
 // =============================================================================
 
-/**
- * @brief Atualiza o nó /ota/ no Firebase com o resultado da atualização
- *
- * @details Em caso de sucesso, limpa a flag "available" e registra a versão
- * instalada e o timestamp. Em caso de falha, mantém "available" = true para
- * permitir nova tentativa, e registra o erro.
- *
- * @param success true = instalação bem-sucedida
- */
 void OTAHandler::_reportResult(bool success) {
     if (_firebase == nullptr || !_firebase->isAuthenticated()) return;
 
     String basePath = "/greenhouses/" + _greenhouseId + "/ota/";
 
     if (success) {
-        // Limpa a flag de atualização disponível
         Firebase.setBool(_firebase->fbdo, basePath + "available", false);
-        // Registra versão instalada
         Firebase.setString(_firebase->fbdo, basePath + "lastInstalledVersion", _pendingVersion);
-        // Registra timestamp da instalação
         Firebase.setInt(_firebase->fbdo, basePath + "lastUpdateTimestamp",
                         (int)_firebase->getCurrentTimestamp());
 
         Serial.println("[OTA] ✅ Resultado reportado ao Firebase: SUCESSO");
     } else {
-        // Mantém available=true para nova tentativa
-        // Registra a falha para diagnóstico
         Firebase.setString(_firebase->fbdo, basePath + "lastError",
                            "Falha no download/instalação - " + _pendingVersion);
         Firebase.setInt(_firebase->fbdo, basePath + "lastErrorTimestamp",

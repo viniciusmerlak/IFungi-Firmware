@@ -18,11 +18,14 @@
 #include "SensorController.h"
 #include "ActuatorController.h"
 #include "QRCodeGenerator.h"
-#include "OTAHandler.h"         // ← OTA: inclusão do handler
+#include "OTAHandler.h"
 #include "LEDScheduler.h"
+#include "OperationMode.h"
 #include <WiFiManager.h>
 
 // Validação em tempo de compilação — abortam o build se o .env estiver incompleto
+// Nota: IFUNGI_FIREBASE_EMAIL e IFUNGI_FIREBASE_PASSWORD NÃO estão aqui
+//       pois são credenciais de runtime inseridas via rede cativa, não build-time.
 #ifndef IFUNGI_WIFI_AP_NAME
     #error "IFUNGI_WIFI_AP_NAME nao definida. Verifique seu arquivo .env"
 #endif
@@ -88,11 +91,20 @@ unsigned long lastLocalSave = 0;
 /// @brief Timestamp do último auto-repair do banco Firebase
 unsigned long lastRepairCheck = 0;
 
+/// @brief Timestamp da última leitura do modo de operação
+unsigned long lastOperationModeCheck = 0;
+
 /**
  * @def REPAIR_CHECK_INTERVAL
  * @brief Intervalo para verificação de integridade do banco (5 minutos)
  */
 const unsigned long REPAIR_CHECK_INTERVAL = 300000;
+
+/**
+ * @def OPERATION_MODE_CHECK_INTERVAL
+ * @brief Intervalo para verificação do modo de operação no Firebase (5 segundos)
+ */
+const unsigned long OPERATION_MODE_CHECK_INTERVAL = 5000;
 
 /**
  * @def SENSOR_READ_INTERVAL
@@ -550,6 +562,9 @@ void setupWiFiAndFirebase() {
             // verifyGreenhouse() já é chamado internamente por authenticate().
             // Garante que o nó OTA existe (sem Firebase Storage)
             firebase.ensureOTANodeExists();
+            // Garante que led_schedule e operation_mode existem (gerados pelo ESP32)
+            firebase.ensureLEDScheduleExists(actuators);
+            firebase.ensureOperationModeExists(actuators);
             
             // Envia dados locais pendentes
             firebase.sendLocalData();
@@ -866,6 +881,25 @@ void handleHistoryAndLocalData() {
 }
 
 // =============================================================================
+// MODO DE OPERAÇÃO
+// =============================================================================
+
+/**
+ * @brief Verifica periodicamente o modo de operação no Firebase e aplica mudanças
+ *
+ * @details Lê /operation_mode/mode a cada 5 segundos. Se o app tiver mudado
+ * o modo, o ActuatorController aplica o preset correspondente imediatamente.
+ */
+void handleOperationMode() {
+    if (!firebase.isAuthenticated() || WiFi.status() != WL_CONNECTED) return;
+
+    if (millis() - lastOperationModeCheck > OPERATION_MODE_CHECK_INTERVAL) {
+        lastOperationModeCheck = millis();
+        firebase.receiveOperationMode(actuators);
+    }
+}
+
+// =============================================================================
 // AUTO-REPAIR DO BANCO FIREBASE
 // =============================================================================
 
@@ -882,6 +916,8 @@ void handleRepairAndOTA() {
         lastRepairCheck = millis();
         firebase.repairMissingFields();
         firebase.ensureOTANodeExists();
+        firebase.ensureLEDScheduleExists(actuators);
+        firebase.ensureOperationModeExists(actuators);
     }
 }
 
@@ -957,8 +993,9 @@ void loop() {
     handleHistoryAndLocalData();
     verifyConnectionStatus();
     handleDebugAndCalibration();
-    otaHandler.handle();    // ← OTA: verifica atualizações a cada 60s
-    handleRepairAndOTA();   // ← verifica integridade do banco a cada 5min
+    handleOperationMode();          // ← verifica modo de operação a cada 5s
+    otaHandler.handle();            // ← OTA: verifica atualizações a cada 60s
+    handleRepairAndOTA();           // ← verifica integridade do banco a cada 5min
     
     // Pequeno delay para estabilidade do sistema
     delay(10);

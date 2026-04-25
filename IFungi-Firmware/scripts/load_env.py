@@ -21,22 +21,41 @@ Segurança:
   • O .env.example (sem valores reais) SIM entra no repositório.
   • Se o .env não existir, o script aborta o build com mensagem clara.
   • Se uma variável obrigatória estiver vazia, o build também aborta.
+  • IFUNGI_FIREBASE_EMAIL e IFUNGI_FIREBASE_PASSWORD são BLOQUEADAS — nunca
+    devem ser compiladas no binário. São credenciais de runtime inseridas
+    pelo usuário via portal WiFiManager e armazenadas na NVS criptografada.
+    Compilar credenciais no .bin permitiria extração via binwalk/strings.
 ────────────────────────────────────────────────────────────────────────────────
 """
 
 import os
 import sys
 
-# Variáveis obrigatórias — o build falha se estiverem ausentes ou vazias
+# Variáveis obrigatórias em build-time — o build falha se estiverem ausentes ou vazias.
 REQUIRED_VARS = [
-    "IFUNGI_FIREBASE_API_KEY",
-    "IFUNGI_FIREBASE_DB_URL",
+    "IFUNGI_FIREBASE_API_KEY",   # Pública por design (como google-services.json)
+    "IFUNGI_FIREBASE_DB_URL",    # Pública por design
+    "IFUNGI_WIFI_AP_NAME",       # Nome do AP de configuração
+    "IFUNGI_WIFI_AP_PASSWORD",   # Senha do portal de setup
+    "IFUNGI_OTA_PASSWORD",       # Usada apenas pelo PlatformIO local, nunca no binário
+]
+
+# ── VARIÁVEIS BLOQUEADAS — NUNCA devem ser compiladas no binário ──────────────
+#
+# IFUNGI_FIREBASE_EMAIL e IFUNGI_FIREBASE_PASSWORD são credenciais de RUNTIME.
+# Elas são inseridas pelo usuário via rede cativa (portal WiFiManager) e
+# armazenadas na NVS criptografada do ESP32.
+#
+# Se estivessem aqui, seriam compiladas no binário e qualquer pessoa com
+# acesso ao .bin poderia extraí-las com strings/binwalk.
+#
+# MOTIVO TÉCNICO: o ESP32 não tem secure enclave — qualquer dado em flash
+# pode ser lido via JTAG ou dump de memória. A única proteção real é não
+# compilar credenciais de usuário no firmware.
+BLOCKED_VARS = {
     "IFUNGI_FIREBASE_EMAIL",
     "IFUNGI_FIREBASE_PASSWORD",
-    "IFUNGI_WIFI_AP_NAME",
-    "IFUNGI_WIFI_AP_PASSWORD",
-    "IFUNGI_OTA_PASSWORD",
-]
+}
 
 # Valores que devem ser tratados como inteiros (sem aspas no define)
 INTEGER_VARS = set()
@@ -112,10 +131,17 @@ if missing:
     env.Exit(1)
 
 # ── Injeta como build_flags ──────────────────────────────────────────────────
-defines = []
+defines  = []
+blocked  = []
+
 for key, value in variables.items():
     if not key.startswith("IFUNGI_"):
         continue  # ignora variáveis de outros projetos no mesmo .env
+
+    # ── BLOQUEIA credenciais de runtime ──────────────────────────────────────
+    if key in BLOCKED_VARS:
+        blocked.append(key)
+        continue  # NUNCA injeta no binário
 
     if key in INTEGER_VARS:
         defines.append(f"-D{key}={value}")
@@ -129,6 +155,10 @@ env.Append(CPPDEFINES=[], CCFLAGS=defines)
 
 print(f"[load_env] ✅ {len(defines)} variáveis injetadas do .env")
 for d in defines:
-    # Oculta o valor real no log de build, mostra só o nome da chave
     key_part = d.split("=")[0].replace("-D", "")
     print(f"           → {key_part} ✓")
+
+if blocked:
+    print(f"[load_env] 🔒 {len(blocked)} variável(eis) BLOQUEADA(S) (não compiladas no binário):")
+    for b in blocked:
+        print(f"           → {b} ✗ (runtime-only — inserida via portal WiFiManager)")

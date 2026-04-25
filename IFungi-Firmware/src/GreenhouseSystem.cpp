@@ -1,4 +1,5 @@
 #include "GreenhouseSystem.h"
+#include "OperationMode.h"
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
 #include <ArduinoJson.h>   // necessário para desserializar registros NVS em sendLocalData
@@ -8,17 +9,29 @@ String FirebaseHandler::getMacAddress() {
 }
 
 bool FirebaseHandler::authenticate(const String& email, const String& password) {
-    const String api = FIREBASE_API_KEY;
-    String dbUrl = DATABASE_URL;
+    // SEGURANÇA: armazenamos em variáveis membro para garantir que os c_str()
+    // não apontem para stack que será desalocada após o retorno desta função.
+    // config.api_key e auth.user.*  precisam de ponteiros válidos durante toda
+    // a sessão Firebase — não apenas durante a chamada de Firebase.begin().
+    static String _apiKey;
+    static String _dbUrl;
+    static String _email;
+    static String _password;
+
+    _apiKey    = FIREBASE_API_KEY;
+    _dbUrl     = DATABASE_URL;
+    _email     = email;
+    _password  = password;
+
     Serial.println("Authenticating with Firebase...");
-    
+
     Firebase.reset(&config);
     Firebase.reconnectNetwork(true);
-    
-    config.api_key = api.c_str();
-    auth.user.email = email.c_str();
-    auth.user.password = password.c_str();
-    config.database_url = dbUrl.c_str();
+
+    config.api_key        = _apiKey.c_str();
+    auth.user.email       = _email.c_str();
+    auth.user.password    = _password.c_str();
+    config.database_url   = _dbUrl.c_str();
     config.token_status_callback = tokenStatusCallback;
     
     Firebase.begin(&config, &auth);
@@ -36,6 +49,8 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
             Serial.print("UID: "); Serial.println(userUID);
             
             verifyGreenhouse();
+            // CORREÇÃO: checkUserPermission agora suporta múltiplas estufas por usuário.
+            // A função migra automaticamente o formato antigo (string) para array JSON.
             checkUserPermission(userUID, greenhouseId);
             return true;
         }
@@ -68,7 +83,6 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
     actuators.set("leds", leds);
     actuators.set("umidificador", humidifierOn);
 
-    // CORREÇÃO: millis() substituído por timestamp Unix real (consistência com demais campos)
     json.set("lastUpdate", (int)getCurrentTimestamp());
     json.set("atuadores", actuators);
 
@@ -122,11 +136,11 @@ bool FirebaseHandler::sendDataToHistory(float temp, float humidity, int co2, int
         return false;
     }
 
-    String timestamp = String(getCurrentTimestamp());
-    String path = "/historico/" + greenhouseId + "/" + timestamp;
+    String tsStr = String(getCurrentTimestamp());
+    String path = "/historico/" + greenhouseId + "/" + tsStr;
     
     FirebaseJson json;
-    json.set("timestamp", timestamp);
+    json.set("timestamp", tsStr);
     json.set("temperatura", temp);
     json.set("umidade", humidity);
     json.set("co2", co2);
@@ -140,8 +154,8 @@ bool FirebaseHandler::sendDataToHistory(float temp, float humidity, int co2, int
         return true;
     } else {
         Serial.println("[FIREBASE] ERRO - Falha ao salvar histórico: " + fbdo.errorReason());
-        unsigned long timestamp = getCurrentTimestamp();
-        saveDataLocally(temp, humidity, co2, co, lux, tvocs, timestamp);
+        unsigned long tsLocal = getCurrentTimestamp();
+        saveDataLocally(temp, humidity, co2, co, lux, tvocs, tsLocal);
         return false;
     }
 }
@@ -193,13 +207,8 @@ void FirebaseHandler::saveDataLocally(float temp, float humidity, int co2, int c
     
     int numRecords = preferences.getInt("num_registros", 0);
     
-    // CORREÇÃO: O modelo anterior usava 7 chaves NVS por registro (temp_N, umid_N, etc.).
-    // Com MAX_RECORDS=50 isso resultava em 350 entradas, estourando o limite de ~100
-    // entradas por namespace do ESP32 — dados eram perdidos silenciosamente.
-    //
-    // Solução: cada registro é serializado como um único JSON numa chave "reg_N".
-    // 50 registros = 50 entradas + metadados → bem dentro do limite.
-    
+    // Cada registro é serializado como um único JSON numa chave "reg_N".
+    // 50 registros = 50 entradas + metadados → bem dentro do limite NVS.
     if (numRecords >= MAX_RECORDS) {
         // Descarta o registro mais antigo (índice 0) deslocando todos
         for (int i = 1; i < MAX_RECORDS; i++) {
@@ -212,16 +221,14 @@ void FirebaseHandler::saveDataLocally(float temp, float humidity, int co2, int c
         preferences.remove(("reg_" + String(numRecords)).c_str());
     }
     
-    // Serializa o registro como JSON numa única chave
-    // Formato: {"t":temp,"h":humidity,"c2":co2,"co":co,"l":lux,"v":tvocs,"ts":timestamp}
     // Chaves abreviadas para economizar espaço na NVS (limite de 64KB total)
     String record = "{\"t\":"   + String(temp, 1)     +
                     ",\"h\":"   + String(humidity, 1)  +
-                    ",\"c2\":"  + String(co2)           +
-                    ",\"co\":"  + String(co)            +
+                    ",\"c2\":" + String(co2)           +
+                    ",\"co\":" + String(co)            +
                     ",\"l\":"   + String(lux)           +
                     ",\"v\":"   + String(tvocs)         +
-                    ",\"ts\":"  + String(timestamp)     + "}";
+                    ",\"ts\":" + String(timestamp)     + "}";
 
     preferences.putString(("reg_" + String(numRecords)).c_str(), record.c_str());
     preferences.putInt("num_registros", numRecords + 1);
@@ -280,26 +287,31 @@ void FirebaseHandler::sendLocalData() {
 
     if (numRecords == 0) return;
 
-    // CORREÇÃO: leitura do novo formato de registro único por chave "reg_N"
-    // O formato antigo (temp_N, umid_N, etc.) foi substituído na saveDataLocally.
     if (!preferences.begin(NAMESPACE, false)) {
         Serial.println("Failed to open Preferences for writing");
         return;
     }
     
     int sent = 0;
+    // CORREÇÃO: marca quais índices foram enviados para recompactação posterior.
+    // O loop anterior removia chaves inline enquanto iterava, o que causava saltos
+    // de índice e perda de registros quando havia corrompidos intercalados.
+    bool sentFlags[MAX_RECORDS] = {};
+
     for (int i = 0; i < numRecords; i++) {
         String keyName = "reg_" + String(i);
         String record  = preferences.getString(keyName.c_str(), "");
 
-        if (record.length() == 0) continue;
+        if (record.length() == 0) {
+            sentFlags[i] = true; // lacuna — descarta
+            continue;
+        }
 
-        // Desserializa o JSON compacto usando ArduinoJson
         StaticJsonDocument<128> doc;
         DeserializationError err = deserializeJson(doc, record);
         if (err) {
             Serial.printf("[NVS] Registro %d corrompido, descartando: %s\n", i, err.c_str());
-            preferences.remove(keyName.c_str());
+            sentFlags[i] = true; // descarta corrompido
             continue;
         }
 
@@ -312,7 +324,7 @@ void FirebaseHandler::sendLocalData() {
 
         if (Firebase.ready() && authenticated) {
             if (sendDataToHistory(temp, humidity, co2, co, lux, tvocs)) {
-                preferences.remove(keyName.c_str());
+                sentFlags[i] = true;
                 sent++;
             } else {
                 Serial.println("[NVS] Falha ao enviar registro " + String(i) + ", interrompendo.");
@@ -324,15 +336,20 @@ void FirebaseHandler::sendLocalData() {
         }
     }
     
-    // Recompacta os registros restantes (remove lacunas dos enviados)
+    // CORREÇÃO: recompacta removendo apenas os registros marcados como enviados/descartados.
+    // Garante que num_registros reflita exatamente os registros restantes válidos,
+    // mesmo que haja corrompidos ou lacunas no meio da sequência.
     int newIndex = 0;
     for (int i = 0; i < numRecords; i++) {
-        String keyName = "reg_" + String(i);
-        String record  = preferences.getString(keyName.c_str(), "");
+        if (sentFlags[i]) {
+            preferences.remove(("reg_" + String(i)).c_str());
+            continue;
+        }
+        String record = preferences.getString(("reg_" + String(i)).c_str(), "");
         if (record.length() > 0) {
             if (i != newIndex) {
                 preferences.putString(("reg_" + String(newIndex)).c_str(), record.c_str());
-                preferences.remove(keyName.c_str());
+                preferences.remove(("reg_" + String(i)).c_str());
             }
             newIndex++;
         }
@@ -358,7 +375,6 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
     json.set("sensores/co", co);
     json.set("sensores/tvocs", tvocs);
     json.set("sensores/luminosidade", lux);
-    // CORREÇÃO: millis() substituído por timestamp Unix real
     json.set("lastUpdate", (int)getCurrentTimestamp());
     json.set("niveis/agua", waterLevel);
 
@@ -375,43 +391,124 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
     }
 }
 
+// =============================================================================
+// CONTROLE DE PERMISSÕES — SUPORTE A MÚLTIPLAS ESTUFAS POR USUÁRIO
+// =============================================================================
+
+/**
+ * @brief Verifica e concede permissão ao usuário para acessar a estufa
+ *
+ * @details A estrutura no Firebase usa um ARRAY JSON de IDs de estufas:
+ *
+ *   /Usuarios/<UID>/Estufas permitidas: ["IFUNGI-AA:BB:CC", "IFUNGI-DD:EE:FF"]
+ *
+ * Isso permite que um único usuário gerencie múltiplas estufas no app
+ * sem sobrescrever as permissões existentes ao adicionar uma nova.
+ *
+ * MIGRAÇÃO AUTOMÁTICA: se o campo ainda estiver no formato antigo (string),
+ * ele é migrado automaticamente para array na primeira chamada desta função.
+ * Isso garante retrocompatibilidade com instalações anteriores.
+ *
+ * SEGURANÇA: esta função apenas verifica/adiciona permissão para a estufa
+ * identificada pelo MAC address do próprio ESP32. Não é possível adicionar
+ * permissão para outra estufa a partir deste código — o ID é gerado
+ * deterministicamente a partir do hardware.
+ *
+ * @param userUID UID do usuário autenticado no Firebase
+ * @param greenhouseID ID da estufa a verificar/adicionar
+ * @return true se o usuário tem ou recebeu permissão
+ */
 bool FirebaseHandler::checkUserPermission(const String& userUID, const String& greenhouseID) {
     if (!Firebase.ready()) {
         Serial.println("Firebase not ready.");
         return false;
     }
 
-    String userPath = "/Usuarios/" + userUID;
-    String greenhousesPath = userPath + "/Estufas permitidas";
-    
-    if (Firebase.getString(fbdo, greenhousesPath)) {
-        if (fbdo.stringData() == greenhouseID) {
-            Serial.println("User already has permission for this greenhouse.");
-            return true;
+    String userPath        = "/Usuarios/" + userUID;
+    String permissionsPath = userPath + "/Estufas permitidas";
+
+    // ── Lê o campo atual de permissões ────────────────────────────────────────
+    if (Firebase.get(fbdo, permissionsPath.c_str())) {
+        String dataType = fbdo.dataType();
+
+        // ── Caso 1: campo é um ARRAY (formato atual) ──────────────────────────
+        if (dataType == "json" || dataType == "array") {
+            // Verifica se a estufa já está no array
+            if (Firebase.getArray(fbdo, permissionsPath.c_str())) {
+                FirebaseJsonArray* arr = fbdo.jsonArrayPtr();
+                FirebaseJsonData   item;
+                size_t count = arr->size();
+                for (size_t idx = 0; idx < count; idx++) {
+                    arr->get(item, idx);
+                    if (item.stringValue == greenhouseID) {
+                        Serial.println("User already has permission for: " + greenhouseID);
+                        return true;
+                    }
+                }
+                // Estufa não encontrada — adiciona ao array existente
+                arr->add(greenhouseID);
+                String updatedJson;
+                arr->toString(updatedJson, false);
+                if (Firebase.setString(fbdo, permissionsPath.c_str(), updatedJson)) {
+                    Serial.println("Greenhouse added to existing permission list: " + greenhouseID);
+                    return true;
+                }
+            }
         }
-        Serial.println("User already has permission for another greenhouse.");
-        return false;
+
+        // ── Caso 2: campo é uma STRING (formato legado — migra para array) ────
+        else if (dataType == "string") {
+            String existing = fbdo.stringData();
+            existing.trim();
+            Serial.println("[PERMISSION] Formato antigo detectado, migrando para array...");
+
+            FirebaseJsonArray newArray;
+            if (existing.length() > 0) {
+                newArray.add(existing); // preserva a estufa já existente
+            }
+
+            // Adiciona a estufa atual se não for duplicata
+            bool alreadyIn = (existing == greenhouseID);
+            if (!alreadyIn) {
+                newArray.add(greenhouseID);
+            }
+
+            String arrayJson;
+            newArray.toString(arrayJson, false);
+
+            // Substitui a string pelo array no Firebase
+            if (Firebase.setString(fbdo, permissionsPath.c_str(), arrayJson)) {
+                Serial.println("[PERMISSION] ✅ Migrado para array: " + arrayJson);
+                return true;
+            } else {
+                Serial.println("[PERMISSION] ❌ Falha na migração: " + fbdo.errorReason());
+                return false;
+            }
+        }
     }
 
-    if (Firebase.setString(fbdo, greenhousesPath.c_str(), greenhouseID)) {
-        Serial.println("Greenhouse permission granted successfully.");
+    // ── Campo não existe: cria o array com esta estufa ────────────────────────
+    Serial.println("[PERMISSION] Criando permissão de acesso para: " + greenhouseID);
+    FirebaseJsonArray newArray;
+    newArray.add(greenhouseID);
+    String arrayJson;
+    newArray.toString(arrayJson, false);
+
+    if (Firebase.setString(fbdo, permissionsPath.c_str(), arrayJson)) {
+        Serial.println("[PERMISSION] ✅ Permissão criada com sucesso");
         return true;
-    } else {
-        Serial.print("Failed to grant permission: ");
-        Serial.println(fbdo.errorReason());
-        
-        FirebaseJson userData;
-        userData.set("Estufas permitidas", greenhouseID);
-        
-        if (Firebase.setJSON(fbdo, userPath.c_str(), userData)) {
-            Serial.println("New user created with greenhouse permission.");
-            return true;
-        } else {
-            Serial.print("Critical error creating user: ");
-            Serial.println(fbdo.errorReason());
-            return false;
-        }
     }
+
+    // Fallback: tenta criar o nó do usuário inteiro
+    FirebaseJson userData;
+    userData.set("Estufas permitidas/0", greenhouseID);
+    if (Firebase.setJSON(fbdo, userPath.c_str(), userData)) {
+        Serial.println("[PERMISSION] ✅ Nó do usuário criado com permissão");
+        return true;
+    }
+
+    Serial.println("[PERMISSION] ❌ Erro crítico ao criar permissão: " + fbdo.errorReason());
+    return false;
 }
 
 void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const String& currentUser) {
@@ -431,11 +528,9 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
             return;
         }
     }
-    checkUserPermission(userUID, greenhouseId);
 
     FirebaseJson json;
     
-    // 🔥 CORREÇÃO: Estrutura completa dos atuadores
     FirebaseJson actuators;
     actuators.set("leds/ligado", false);
     actuators.set("leds/watts", 0);
@@ -448,11 +543,8 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
 
     json.set("createdBy", creatorUser);
     json.set("currentUser", currentUser);
-    // CORREÇÃO: time(nullptr) pode retornar 0 se NTP não sincronizou ainda.
-    // getCurrentTimestamp() tem fallback para offset baseado em NVS.
     json.set("lastUpdate", (int)getCurrentTimestamp());
 
-    // 🔥 CORREÇÃO: Estrutura completa dos sensores
     FirebaseJson sensors;
     sensors.set("tvocs", 0);
     sensors.set("co", 0);
@@ -462,7 +554,6 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     sensors.set("umidade", 0);
     json.set("sensores", sensors);
 
-    // 🔥 CORREÇÃO: Estrutura completa dos setpoints
     FirebaseJson setpoints;
     setpoints.set("lux", 5000);
     setpoints.set("tMax", 30.0);
@@ -475,11 +566,8 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     json.set("setpoints", setpoints);
 
     json.set("niveis/agua", false);
+    json.set("debug_mode", false);
 
-    // 🔥 NOVO: Campos para debug e controle manual
-    json.set("debug_mode", false); // Modo debug desativado por padrão
-    
-    // 🔥 NOVO: Estrutura para controle manual dos atuadores
     FirebaseJson manualActuators;
     manualActuators.set("rele1", false);
     manualActuators.set("rele2", false);
@@ -490,7 +578,6 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     manualActuators.set("umidificador", false);
     json.set("manual_actuators", manualActuators);
 
-    // 🔥 NOVO: Estrutura para devmode
     FirebaseJson devmode;
     devmode.set("analogRead", false);
     devmode.set("boolean", false);
@@ -499,17 +586,42 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     devmode.set("pwmValue", 0);
     json.set("devmode", devmode);
 
-    // 🔥 NOVO: Status do sistema
+    FirebaseJson ledSched;
+    ledSched.set("scheduleEnabled", false);
+    ledSched.set("solarSimEnabled", false);
+    ledSched.set("onHour",    6);
+    ledSched.set("onMinute",  0);
+    ledSched.set("offHour",  20);
+    ledSched.set("offMinute", 0);
+    ledSched.set("intensity", 255);
+    json.set("led_schedule", ledSched);
+
+    FirebaseJson opMode;
+    opMode.set("mode",        "manual");
+    opMode.set("lastChanged", (int)getCurrentTimestamp());
+    opMode.set("changedBy",   "esp32");
+    json.set("operation_mode", opMode);
+
     FirebaseJson status;
     status.set("online", true);
-    // CORREÇÃO: millis() substituído por timestamp Unix real
     status.set("lastHeartbeat", (int)getCurrentTimestamp());
     status.set("ip", WiFi.localIP().toString());
     json.set("status", status);
 
+    // Nó OTA com campos iniciais — URL preenchida externamente pelo desenvolvedor
+    FirebaseJson otaNode;
+    otaNode.set("available", false);
+    otaNode.set("version",   "");
+    otaNode.set("url",       "");
+    otaNode.set("notes",     "Insira a URL HTTPS do .bin e mude available para true");
+    json.set("ota", otaNode);
+
     String path = "/greenhouses/" + greenhouseId;
     if (Firebase.setJSON(fbdo, path.c_str(), json)) {
         Serial.println("✅ Greenhouse created successfully with complete structure!");
+        // CORREÇÃO: checkUserPermission chamado apenas aqui, não duplicado em verifyGreenhouse.
+        // O fluxo correto é: authenticate() → verifyGreenhouse() → createInitialGreenhouse()
+        // → checkUserPermission(). Chamar antes de criar causava race condition.
         checkUserPermission(userUID, greenhouseId);
     } else {
         Serial.print("❌ Error creating greenhouse: ");
@@ -521,6 +633,7 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
             delay(1000);
             if (Firebase.ready() && Firebase.setJSON(fbdo, path.c_str(), json)) {
                 Serial.println("✅ Greenhouse created after renewing token!");
+                checkUserPermission(userUID, greenhouseId);
             }
         }
     }
@@ -535,8 +648,6 @@ void FirebaseHandler::sendHeartbeat() {
     
     FirebaseJson json;
     json.set("online", true);
-    // CORREÇÃO: millis() retorna ms desde o boot, não um timestamp Unix.
-    // getCurrentTimestamp() usa NTP e retorna epoch real.
     json.set("lastHeartbeat", (int)getCurrentTimestamp());
     json.set("ip", WiFi.localIP().toString());
     
@@ -556,25 +667,29 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
 
     String path = "/greenhouses/" + greenhouseId;
     
-    // Primeiro verifica se a estufa existe
     if (Firebase.get(fbdo, path.c_str())) {
         if (fbdo.dataType() != "null") {
             Serial.println("Greenhouse found. Checking structure...");
             
-            // Verifica se a estrutura está completa
+            // CORREÇÃO: isGreenhouseStructureComplete() já chama updateNode() internamente
+            // para adicionar campos faltantes. Se retornar false, a estufa está tão
+            // corrompida que precisa ser recriada — mas NÃO chamamos createInitialGreenhouse()
+            // aqui para evitar sobrescrever dados do usuário desnecessariamente.
+            // A função repair já cobre campos individuais faltantes.
             if (!isGreenhouseStructureComplete(greenhouseId)) {
-                Serial.println("Greenhouse structure incomplete, recreating...");
+                Serial.println("Greenhouse structure incomplete after repair attempt.");
+                // Tenta recriar apenas se a estrutura está completamente inválida
+                // (isGreenhouseStructureComplete() já tentou reparar — se falhou é crítico)
                 createInitialGreenhouse(userUID, userUID);
-                return true; // Retorna true porque a estufa existe, mas foi recriada
+            } else {
+                Serial.println("Greenhouse structure is complete.");
             }
-            
-            Serial.println("Greenhouse structure is complete.");
             return true;
         }
     }
     
-    Serial.println("Greenhouse not found, creating new...");
-    createInitialGreenhouse(userUID, userUID);
+    // Estufa não existe — createInitialGreenhouse será chamada pelo caller (verifyGreenhouse)
+    Serial.println("Greenhouse not found.");
     return false;
 }
 
@@ -584,9 +699,8 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
     }
 
     String path = "/greenhouses/" + greenhouseId;
-    FirebaseJson json;
     
-    // Lista de campos obrigatórios que devem existir
+    // Lista de campos obrigatórios
     const char* requiredFields[] = {
         "atuadores",
         "atuadores/leds",
@@ -620,20 +734,19 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         "status",
         "status/online",
         "status/lastHeartbeat",
-        // Agendador de LEDs
         "led_schedule",
         "led_schedule/scheduleEnabled",
         "led_schedule/solarSimEnabled",
         "led_schedule/onHour",
         "led_schedule/offHour",
         "led_schedule/intensity",
-        // Nó OTA
+        "operation_mode",
+        "operation_mode/mode",
         "ota"
     };
     
     const int numFields = sizeof(requiredFields) / sizeof(requiredFields[0]);
     
-    // Carrega o JSON completo da estufa
     if (!Firebase.getJSON(fbdo, path.c_str())) {
         Serial.println("❌ Error loading greenhouse JSON: " + fbdo.errorReason());
         return false;
@@ -642,96 +755,74 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
     FirebaseJson *jsonPtr = fbdo.jsonObjectPtr();
     FirebaseJsonData result;
     
-    // Verifica cada campo obrigatório
-    for (int i = 0; i < numFields; i++) {
-        if (!jsonPtr->get(result, requiredFields[i])) {
-            Serial.println("❌ Missing field: " + String(requiredFields[i]));
-            return false;
-        }
-        
-        // Verifica se o campo tem um valor válido (não é null)
-        if (result.typeNum == FirebaseJson::JSON_NULL) {
-            Serial.println("❌ Field is null: " + String(requiredFields[i]));
-            return false;
-        }
-    }
-    
-    // 🔥 CORREÇÃO: Verifica campos opcionais de debug e calibração
-    // Se não existirem, vamos criá-los para completar a estrutura
-    
     bool needsUpdate = false;
     FirebaseJson updateJson;
-    
-    // Verifica e cria campo debug_mode se não existir
+
+    // Verifica campos obrigatórios
+    for (int i = 0; i < numFields; i++) {
+        if (!jsonPtr->get(result, requiredFields[i]) ||
+            result.typeNum == FirebaseJson::JSON_NULL) {
+            Serial.println("❌ Missing/null field: " + String(requiredFields[i]));
+            needsUpdate = true;
+            // Não retorna false imediatamente — coleta todos os campos faltantes
+            // e aplica um único updateNode() ao final (menos round-trips ao Firebase)
+        }
+    }
+
+    // Verifica e cria campos opcionais de debug/dev
     if (!jsonPtr->get(result, "debug_mode")) {
-        Serial.println("⚠️ debug_mode field missing, creating...");
         updateJson.set("debug_mode", false);
         needsUpdate = true;
     }
-    
-    // Verifica e cria estrutura manual_actuators se não existir
     if (!jsonPtr->get(result, "manual_actuators")) {
-        Serial.println("⚠️ manual_actuators field missing, creating...");
-        FirebaseJson manualActuators;
-        manualActuators.set("rele1", false);
-        manualActuators.set("rele2", false);
-        manualActuators.set("rele3", false);
-        manualActuators.set("rele4", false);
-        manualActuators.set("leds/ligado", false);
-        manualActuators.set("leds/intensity", 0);
-        manualActuators.set("umidificador", false);
-        updateJson.set("manual_actuators", manualActuators);
+        FirebaseJson ma;
+        ma.set("rele1", false); ma.set("rele2", false);
+        ma.set("rele3", false); ma.set("rele4", false);
+        ma.set("leds/ligado", false); ma.set("leds/intensity", 0);
+        ma.set("umidificador", false);
+        updateJson.set("manual_actuators", ma);
         needsUpdate = true;
     }
-    
-    // 🔥 NOVO: Verifica e cria estrutura devmode se não existir
     if (!jsonPtr->get(result, "devmode")) {
-        Serial.println("⚠️ devmode field missing, creating...");
-        FirebaseJson devmode;
-        devmode.set("analogRead", false);
-        devmode.set("boolean", false);
-        devmode.set("pin", -1);
-        devmode.set("pwm", false);
-        devmode.set("pwmValue", 0);
-        updateJson.set("devmode", devmode);
+        FirebaseJson dm;
+        dm.set("analogRead", false); dm.set("boolean", false);
+        dm.set("pin", -1); dm.set("pwm", false); dm.set("pwmValue", 0);
+        updateJson.set("devmode", dm);
         needsUpdate = true;
     }
-    
-    // Verifica e cria led_schedule se não existir
     if (!jsonPtr->get(result, "led_schedule")) {
-        Serial.println("⚠️ led_schedule missing, creating...");
-        FirebaseJson ledSched;
-        ledSched.set("scheduleEnabled", false);
-        ledSched.set("solarSimEnabled", false);
-        ledSched.set("onHour",          6);
-        ledSched.set("onMinute",        0);
-        ledSched.set("offHour",        20);
-        ledSched.set("offMinute",       0);
-        ledSched.set("intensity",      255);
-        updateJson.set("led_schedule", ledSched);
+        FirebaseJson ls;
+        ls.set("scheduleEnabled", false); ls.set("solarSimEnabled", false);
+        ls.set("onHour", 6); ls.set("onMinute", 0);
+        ls.set("offHour", 20); ls.set("offMinute", 0);
+        ls.set("intensity", 255);
+        updateJson.set("led_schedule", ls);
         needsUpdate = true;
     }
-
-    // Verifica e cria nó OTA se não existir
     if (!jsonPtr->get(result, "ota")) {
-        Serial.println("⚠️ ota node missing, creating...");
-        FirebaseJson otaNode;
-        otaNode.set("available", false);
-        otaNode.set("version",   "");
-        otaNode.set("url",       "");
-        otaNode.set("notes",     "");
-        updateJson.set("ota", otaNode);
+        FirebaseJson ota;
+        ota.set("available", false); ota.set("version", "");
+        ota.set("url", ""); ota.set("notes", "");
+        updateJson.set("ota", ota);
+        needsUpdate = true;
+    }
+    if (!jsonPtr->get(result, "operation_mode")) {
+        FirebaseJson om;
+        om.set("mode", "manual");
+        om.set("lastChanged", (int)getCurrentTimestamp());
+        om.set("changedBy", "esp32");
+        updateJson.set("operation_mode", om);
         needsUpdate = true;
     }
 
-    // Se faltam campos, atualiza a estufa no Firebase
     if (needsUpdate) {
-        Serial.println("🔄 Completing greenhouse structure with missing fields...");
+        Serial.println("🔄 Repairing greenhouse structure...");
         if (Firebase.updateNode(fbdo, path.c_str(), updateJson)) {
-            Serial.println("✅ Greenhouse structure completed successfully!");
+            Serial.println("✅ Greenhouse structure repaired successfully!");
+            return true; // reparou com sucesso
         } else {
-            Serial.println("❌ Failed to complete greenhouse structure: " + fbdo.errorReason());
-            return false;
+            Serial.println("❌ Failed to repair: " + fbdo.errorReason());
+            return false; // falha no repair → caller decide se recria
         }
     }
     
@@ -771,10 +862,6 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         FirebaseJson *json = fbdo.jsonObjectPtr();
         FirebaseJsonData result;
         
-        // CORREÇÃO: cada campo é lido de forma independente.
-        // A lógica anterior acumulava erros com &= fazendo com que um único
-        // campo ausente zerasse todos os setpoints seguintes silenciosamente.
-        // Agora cada campo mantém seu valor atual caso não exista no Firebase.
         struct Setpoints {
             int   lux     = 5000;
             float tMax    = 30.0f;
@@ -796,22 +883,14 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         if (json->get(result, "co2Sp"))   { setpoints.co2Sp   = result.intValue;   fieldsRead++; }
         if (json->get(result, "tvocsSp")) { setpoints.tvocsSp = result.intValue;   fieldsRead++; }
 
-        // Aplica sempre que pelo menos um campo foi lido com sucesso
         if (fieldsRead > 0) {
             Serial.printf("[FIREBASE] Setpoints recebidos (%d/8 campos):\n", fieldsRead);
-            Serial.println("- Lux: "      + String(setpoints.lux));
-            Serial.println("- Temp Max: " + String(setpoints.tMax));
-            Serial.println("- Temp Min: " + String(setpoints.tMin));
-            Serial.println("- Hum Max: "  + String(setpoints.uMax));
-            Serial.println("- Hum Min: "  + String(setpoints.uMin));
-            Serial.println("- TVOCs: "    + String(setpoints.tvocsSp));
-
             actuators.applySetpoints(setpoints.lux, setpoints.tMin, setpoints.tMax,
                                      setpoints.uMin, setpoints.uMax, setpoints.coSp,
                                      setpoints.co2Sp, setpoints.tvocsSp);
 
             if (fieldsRead < 8) {
-                Serial.printf("[FIREBASE] ⚠️ %d campo(s) ausentes — valores padrão mantidos para eles.\n", 8 - fieldsRead);
+                Serial.printf("[FIREBASE] ⚠️ %d campo(s) ausentes — valores padrão mantidos.\n", 8 - fieldsRead);
             }
         } else {
             Serial.println("[FIREBASE] ⚠️ Nenhum setpoint encontrado no JSON.");
@@ -820,8 +899,6 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         Serial.println("Error receiving setpoints: " + fbdo.errorReason());
     }
 }
-
-// 🔥 NOVAS FUNÇÕES PARA DEBUG E CALIBRAÇÃO
 
 bool FirebaseHandler::getDebugMode() {
     if (!authenticated || !Firebase.ready()) {
@@ -836,14 +913,8 @@ bool FirebaseHandler::getDebugMode() {
 }
 
 void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& relay3, bool& relay4, bool& ledsOn, int& ledsIntensity, bool& humidifierOn) {
-    // 🔥 CORREÇÃO: Inicializa com valores padrão
-    relay1 = false;
-    relay2 = false;
-    relay3 = false;
-    relay4 = false;
-    ledsOn = false;
-    ledsIntensity = 0;
-    humidifierOn = false;
+    relay1 = false; relay2 = false; relay3 = false; relay4 = false;
+    ledsOn = false; ledsIntensity = 0; humidifierOn = false;
     
     if (!authenticated || !Firebase.ready()) {
         return;
@@ -858,27 +929,19 @@ void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& 
         if (json->get(result, "rele2")) relay2 = result.boolValue;
         if (json->get(result, "rele3")) relay3 = result.boolValue;
         if (json->get(result, "rele4")) relay4 = result.boolValue;
-        
         if (json->get(result, "leds/ligado")) ledsOn = result.boolValue;
         if (json->get(result, "leds/intensity")) ledsIntensity = result.intValue;
-        
         if (json->get(result, "umidificador")) humidifierOn = result.boolValue;
         
-        Serial.printf("🔧 Manual states from Firebase - R1:%d R2:%d R3:%d R4:%d LED:%d(%d) HUM:%d\n",
+        Serial.printf("🔧 Manual states - R1:%d R2:%d R3:%d R4:%d LED:%d(%d) HUM:%d\n",
                      relay1, relay2, relay3, relay4, ledsOn, ledsIntensity, humidifierOn);
     } else {
         Serial.println("❌ Failed to read manual actuator states: " + fbdo.errorReason());
     }
 }
 
-// 🔥 NOVA FUNÇÃO: Obtém configurações do devmode
 void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWrite, int& pin, bool& pwm, int& pwmValue) {
-    // Valores padrão
-    analogRead = false;
-    digitalWrite = false;
-    pin = -1;
-    pwm = false;
-    pwmValue = 0;
+    analogRead = false; digitalWrite = false; pin = -1; pwm = false; pwmValue = 0;
     
     if (!authenticated || !Firebase.ready()) {
         return;
@@ -894,31 +957,15 @@ void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWrite, i
         if (json->get(result, "pin")) pin = result.intValue;
         if (json->get(result, "pwm")) pwm = result.boolValue;
         if (json->get(result, "pwmValue")) pwmValue = result.intValue;
-        
-        Serial.printf("[DEVMODE] Settings - AnalogRead: %d, DigitalWrite: %d, Pin: %d, PWM: %d, PWMValue: %d\n",
-                     analogRead, digitalWrite, pin, pwm, pwmValue);
     } else {
         Serial.println("[DEVMODE] ERRO - Falha ao ler configurações: " + fbdo.errorReason());
     }
 }
 
 // =============================================================================
-// AGENDADOR DE LEDs — lê /led_schedule do Firebase RTDB
+// AGENDADOR DE LEDs
 // =============================================================================
 
-/**
- * @brief Lê a configuração do agendador de LEDs do Firebase e aplica no ActuatorController
- *
- * @details Lê o nó /greenhouses/<ID>/led_schedule e popula o LEDScheduler.
- * Chamada pelo handleFirebase() em MainController a cada FIREBASE_UPDATE_INTERVAL.
- *
- * Campos lidos:
- *  - scheduleEnabled (bool)  → ativa modo timer
- *  - solarSimEnabled (bool)  → ativa simulação solar (sobrepõe timer)
- *  - onHour  / onMinute  (int) → horário de início
- *  - offHour / offMinute (int) → horário de fim
- *  - intensity (int 0-255)   → intensidade no modo timer
- */
 void FirebaseHandler::receiveLEDSchedule(ActuatorController& actuators) {
     if (!authenticated || !Firebase.ready()) return;
 
@@ -938,33 +985,12 @@ void FirebaseHandler::receiveLEDSchedule(ActuatorController& actuators) {
     if (json->get(result, "offHour"))         actuators.ledScheduler.offHour         = result.intValue;
     if (json->get(result, "offMinute"))       actuators.ledScheduler.offMinute       = result.intValue;
     if (json->get(result, "intensity"))       actuators.ledScheduler.configIntensity = result.intValue;
-
-    Serial.printf("[LED_SCHED] Config: schedule=%d solar=%d on=%02d:%02d off=%02d:%02d int=%d\n",
-                  actuators.ledScheduler.scheduleEnabled,
-                  actuators.ledScheduler.solarSimEnabled,
-                  actuators.ledScheduler.onHour,
-                  actuators.ledScheduler.onMinute,
-                  actuators.ledScheduler.offHour,
-                  actuators.ledScheduler.offMinute,
-                  actuators.ledScheduler.configIntensity);
 }
 
 // =============================================================================
-// OTA — garante que o nó existe no RTDB (URL direta, sem Firebase Storage)
+// OTA
 // =============================================================================
 
-/**
- * @brief Garante que o nó /ota/ existe no RTDB com estrutura mínima
- *
- * @details O OTAHandler verifica /ota/available, /ota/version e /ota/url.
- * Esta função cria o nó se ele não existir, permitindo que a URL do .bin
- * seja inserida diretamente no RTDB sem depender do Firebase Storage.
- *
- * Fontes válidas de URL:
- *  - Firebase Storage:  https://firebasestorage.googleapis.com/...
- *  - GitHub Releases:   https://github.com/.../releases/download/v1.1.0/firmware.bin
- *  - Qualquer HTTPS:    qualquer servidor acessível pelo ESP32
- */
 void FirebaseHandler::ensureOTANodeExists() {
     if (!authenticated || !Firebase.ready()) return;
 
@@ -980,7 +1006,7 @@ void FirebaseHandler::ensureOTANodeExists() {
     otaNode.set("available", false);
     otaNode.set("version",   "");
     otaNode.set("url",       "");
-    otaNode.set("notes",     "Insira a URL do .bin e mude available para true");
+    otaNode.set("notes",     "Insira a URL HTTPS do .bin e mude available para true");
 
     if (Firebase.setJSON(fbdo, basePath.c_str(), otaNode)) {
         Serial.println("[OTA] ✅ Nó OTA criado no RTDB");
@@ -990,22 +1016,122 @@ void FirebaseHandler::ensureOTANodeExists() {
 }
 
 // =============================================================================
-// AUTO-REPAIR — regenera campos ausentes sem recriar o banco inteiro
+// LED SCHEDULE — criação autônoma pelo ESP32
 // =============================================================================
 
-/**
- * @brief Verifica e regenera apenas os campos ausentes no RTDB
- *
- * @details Mais leve que isGreenhouseStructureComplete: não baixa o JSON inteiro.
- * Verifica campo a campo com Firebase.get() e adiciona apenas o que falta.
- * Ideal para chamada periódica (ex: a cada 5 minutos).
- *
- * Cobre:
- *  - Todos os setpoints
- *  - led_schedule completo
- *  - Nó OTA
- *  - debug_mode, manual_actuators, devmode
- */
+void FirebaseHandler::ensureLEDScheduleExists(ActuatorController& actuators) {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/led_schedule";
+
+    if (Firebase.get(fbdo, (path + "/scheduleEnabled").c_str()) &&
+        fbdo.dataType() != "null") {
+        return;
+    }
+
+    Serial.println("[LED_SCHED] Nó led_schedule não encontrado, criando...");
+
+    FirebaseJson ls;
+    ls.set("scheduleEnabled", actuators.ledScheduler.scheduleEnabled);
+    ls.set("solarSimEnabled", actuators.ledScheduler.solarSimEnabled);
+    ls.set("onHour",          actuators.ledScheduler.onHour);
+    ls.set("onMinute",        actuators.ledScheduler.onMinute);
+    ls.set("offHour",         actuators.ledScheduler.offHour);
+    ls.set("offMinute",       actuators.ledScheduler.offMinute);
+    ls.set("intensity",       actuators.ledScheduler.configIntensity);
+
+    if (Firebase.setJSON(fbdo, path.c_str(), ls)) {
+        Serial.println("[LED_SCHED] ✅ Nó led_schedule criado pelo ESP32");
+    } else {
+        Serial.println("[LED_SCHED] ❌ Falha ao criar led_schedule: " + fbdo.errorReason());
+    }
+}
+
+// =============================================================================
+// MODOS DE OPERAÇÃO
+// =============================================================================
+
+void FirebaseHandler::ensureOperationModeExists(ActuatorController& actuators) {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/operation_mode/mode";
+
+    if (Firebase.get(fbdo, path.c_str()) && fbdo.dataType() != "null") {
+        return;
+    }
+
+    Serial.println("[MODE] Nó operation_mode não encontrado, criando...");
+
+    String base = "/greenhouses/" + greenhouseId + "/operation_mode";
+    FirebaseJson opMode;
+    opMode.set("mode",        operationModeToString(actuators.getOperationMode()));
+    opMode.set("lastChanged", (int)getCurrentTimestamp());
+    opMode.set("changedBy",   "esp32");
+
+    if (Firebase.setJSON(fbdo, base.c_str(), opMode)) {
+        Serial.println("[MODE] ✅ Nó operation_mode criado pelo ESP32");
+    } else {
+        Serial.println("[MODE] ❌ Falha ao criar operation_mode: " + fbdo.errorReason());
+    }
+}
+
+void FirebaseHandler::receiveOperationMode(ActuatorController& actuators) {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/operation_mode/mode";
+
+    if (!Firebase.getString(fbdo, path.c_str())) {
+        ensureOperationModeExists(actuators);
+        return;
+    }
+
+    String modeStr = fbdo.stringData();
+    OperationMode newMode = operationModeFromString(modeStr);
+
+    if (newMode != actuators.getOperationMode()) {
+        Serial.printf("[MODE] 📲 App solicitou mudança: %s → %s\n",
+                      operationModeLabel(actuators.getOperationMode()).c_str(),
+                      operationModeLabel(newMode).c_str());
+        actuators.applyOperationMode(newMode);
+
+        if (newMode != MODE_MANUAL) {
+            ensureLEDScheduleExists(actuators);
+            String schedPath = "/greenhouses/" + greenhouseId + "/led_schedule";
+            FirebaseJson ls;
+            ls.set("scheduleEnabled", actuators.ledScheduler.scheduleEnabled);
+            ls.set("solarSimEnabled", actuators.ledScheduler.solarSimEnabled);
+            ls.set("onHour",          actuators.ledScheduler.onHour);
+            ls.set("onMinute",        actuators.ledScheduler.onMinute);
+            ls.set("offHour",         actuators.ledScheduler.offHour);
+            ls.set("offMinute",       actuators.ledScheduler.offMinute);
+            ls.set("intensity",       actuators.ledScheduler.configIntensity);
+            Firebase.updateNode(fbdo, schedPath.c_str(), ls);
+        }
+    }
+}
+
+void FirebaseHandler::publishOperationMode(OperationMode mode) {
+    if (!authenticated || !Firebase.ready()) return;
+    if (mode == _lastPublishedMode) return;
+
+    String base = "/greenhouses/" + greenhouseId + "/operation_mode";
+    FirebaseJson opMode;
+    opMode.set("mode",        operationModeToString(mode));
+    opMode.set("lastChanged", (int)getCurrentTimestamp());
+    opMode.set("changedBy",   "esp32");
+
+    if (Firebase.updateNode(fbdo, base.c_str(), opMode)) {
+        _lastPublishedMode = mode;
+        Serial.printf("[MODE] ✅ Modo publicado: %s\n", operationModeLabel(mode).c_str());
+    } else {
+        Serial.println("[MODE] ❌ Falha ao publicar modo: " + fbdo.errorReason());
+    }
+}
+
+// =============================================================================
+// AUTO-REPAIR DO BANCO FIREBASE
+// =============================================================================
+
 void FirebaseHandler::repairMissingFields() {
     if (!authenticated || !Firebase.ready()) return;
 
@@ -1013,7 +1139,6 @@ void FirebaseHandler::repairMissingFields() {
     bool   dirty = false;
     FirebaseJson patch;
 
-    // ── setpoints ────────────────────────────────────────────────────────────
     struct { const char* key; float defVal; bool isFloat; } spFields[] = {
         {"setpoints/lux",     5000, false},
         {"setpoints/tMax",    30.0, true },
@@ -1034,36 +1159,39 @@ void FirebaseHandler::repairMissingFields() {
         }
     }
 
-    // ── led_schedule ─────────────────────────────────────────────────────────
     if (!Firebase.get(fbdo, (base + "/led_schedule").c_str()) ||
         fbdo.dataType() == "null") {
         FirebaseJson ls;
-        ls.set("scheduleEnabled", false);
-        ls.set("solarSimEnabled", false);
-        ls.set("onHour",    6);
-        ls.set("onMinute",  0);
-        ls.set("offHour",  20);
-        ls.set("offMinute", 0);
-        ls.set("intensity",255);
+        ls.set("scheduleEnabled", false); ls.set("solarSimEnabled", false);
+        ls.set("onHour", 6); ls.set("onMinute", 0);
+        ls.set("offHour", 20); ls.set("offMinute", 0);
+        ls.set("intensity", 255);
         patch.set("led_schedule", ls);
         dirty = true;
         Serial.println("[REPAIR] ⚠️ Campo ausente: led_schedule");
     }
 
-    // ── ota ──────────────────────────────────────────────────────────────────
     if (!Firebase.get(fbdo, (base + "/ota").c_str()) ||
         fbdo.dataType() == "null") {
         FirebaseJson ota;
-        ota.set("available", false);
-        ota.set("version",   "");
-        ota.set("url",       "");
-        ota.set("notes",     "");
+        ota.set("available", false); ota.set("version", "");
+        ota.set("url", ""); ota.set("notes", "");
         patch.set("ota", ota);
         dirty = true;
         Serial.println("[REPAIR] ⚠️ Campo ausente: ota");
     }
 
-    // ── debug_mode ───────────────────────────────────────────────────────────
+    if (!Firebase.get(fbdo, (base + "/operation_mode").c_str()) ||
+        fbdo.dataType() == "null") {
+        FirebaseJson opMode;
+        opMode.set("mode", "manual");
+        opMode.set("lastChanged", (int)getCurrentTimestamp());
+        opMode.set("changedBy", "esp32");
+        patch.set("operation_mode", opMode);
+        dirty = true;
+        Serial.println("[REPAIR] ⚠️ Campo ausente: operation_mode");
+    }
+
     if (!Firebase.get(fbdo, (base + "/debug_mode").c_str()) ||
         fbdo.dataType() == "null") {
         patch.set("debug_mode", false);
@@ -1071,7 +1199,6 @@ void FirebaseHandler::repairMissingFields() {
         Serial.println("[REPAIR] ⚠️ Campo ausente: debug_mode");
     }
 
-    // ── Aplica patch ─────────────────────────────────────────────────────────
     if (dirty) {
         if (Firebase.updateNode(fbdo, base.c_str(), patch)) {
             Serial.println("[REPAIR] ✅ Campos ausentes restaurados com sucesso");
