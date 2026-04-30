@@ -40,19 +40,19 @@ int SensorController::mq7PpmFromAdc(int adcRaw, float tempC, float rhPct, bool c
 }
 
 void SensorController::begin() {
-    Serial.println("[SENSOR] Inicializando controlador de sensores...");
+    Serial.println("[sensor] Inicializando controlador de sensores...");
 
     mq7WarmupUntil = millis() + 120000UL;
-    Serial.println("[SENSOR] MQ-7: aguardando ~120 s de estabilização antes de usar ppm (sem leitura de aquecedor).");
+    Serial.println("[sensor] MQ-7: aguardando ~120 s de estabilização antes de usar ppm (sem leitura de aquecedor).");
 
     pinMode(WATERLEVEL_PIN, INPUT);
     pinMode(LDR_PIN, INPUT);
     pinMode(MQ7_PIN, INPUT);
 
-    Serial.println("[SENSOR] Configuração de pinos concluída");
-    Serial.printf("[SENSOR] Threshold sensor água: %d\n", WATER_LEVEL_THRESHOLD);
+    Serial.println("[sensor] Configuração de pinos concluída");
+    Serial.printf("[sensor] Threshold sensor água: %d\n", WATER_LEVEL_THRESHOLD);
 
-    Serial.println("[SENSOR] Inicializando DHT22...");
+    Serial.println("[sensor] Inicializando DHT22...");
     dht.begin();
     delay(2000);
 
@@ -65,25 +65,25 @@ void SensorController::begin() {
 
         if (!isnan(tempTest) && !isnan(humidityTest)) {
             dhtOK = true;
-            Serial.println("[SENSOR] DHT22 inicializado com sucesso");
+            Serial.println("[sensor] DHT22 inicializado com sucesso");
         } else {
-            Serial.printf("[SENSOR] Tentativa %d: Falha na leitura do DHT22\n", dhtAttempts + 1);
+            Serial.printf("[sensor] Tentativa %d: Falha na leitura do DHT22\n", dhtAttempts + 1);
             dhtAttempts++;
             delay(1000);
         }
     }
 
     if (!dhtOK) {
-        Serial.println("[SENSOR] DHT22: ERRO - Sensor não responde");
+        Serial.println("[sensor] DHT22: ERRO - Sensor não responde");
     }
 
-    Serial.println("[SENSOR] Inicializando CCS811...");
+    Serial.println("[sensor] Inicializando CCS811...");
     ccsOK = false;
 
     for (int attempt = 0; attempt < 3; attempt++) {
         if (ccs.begin()) {
             ccsOK = true;
-            Serial.println("[SENSOR] CCS811 inicializado com sucesso");
+            Serial.println("[sensor] CCS811 inicializado com sucesso");
 
             unsigned long startTime = millis();
             while (!ccs.available() && (millis() - startTime < 5000)) {
@@ -91,20 +91,20 @@ void SensorController::begin() {
             }
 
             if (ccs.available()) {
-                Serial.println("[SENSOR] CCS811 pronto para leitura");
+                Serial.println("[sensor] CCS811 pronto para leitura");
                 break;
             } else {
-                Serial.println("[SENSOR] CCS811: ERRO - Não ficou pronto dentro do timeout");
+                Serial.println("[sensor] CCS811: ERRO - Não ficou pronto dentro do timeout");
                 ccsOK = false;
             }
         } else {
-            Serial.printf("[SENSOR] Tentativa %d: Falha na inicialização do CCS811\n", attempt + 1);
+            Serial.printf("[sensor] Tentativa %d: Falha na inicialização do CCS811\n", attempt + 1);
             delay(1000);
         }
     }
 
     if (!ccsOK) {
-        Serial.println("[SENSOR] CCS811: ERRO - Sensor não inicializado");
+        Serial.println("[sensor] CCS811: ERRO - Sensor não inicializado");
     }
 
     lastUpdate = 0;
@@ -116,7 +116,7 @@ void SensorController::begin() {
     light = 0;
     waterLevel = false;
 
-    Serial.println("[SENSOR] Controlador de sensores inicializado com sucesso");
+    Serial.println("[sensor] Controlador de sensores inicializado com sucesso");
 }
 
 void SensorController::update() {
@@ -133,12 +133,15 @@ void SensorController::update() {
 
                 if (isnan(newTemp) || isnan(newHum)) {
                     dhtFailCount++;
-                    Serial.printf("[SENSOR] DHT22: leitura inválida (%d/3 falhas consecutivas)\n", dhtFailCount);
+                    Serial.printf("[sensor] DHT22: leitura inválida (%d/3 falhas consecutivas)\n", dhtFailCount);
 
                     if (dhtFailCount >= 3) {
                         dhtOK = false;
                         dhtRecoveryTime = millis();
-                        Serial.println("[SENSOR] DHT22: INOPERANTE — tentativa de recuperação em 30s");
+                        // Fail-safe while DHT is down: keep climate neutral and avoid over-humidification.
+                        temperature = 25.0f;
+                        humidity = 100.0f;
+                        Serial.println("[sensor] DHT22: INOPERANTE — tentativa de recuperação em 30s");
                     }
                 } else {
                     temperature  = newTemp;
@@ -153,7 +156,7 @@ void SensorController::update() {
                 }
             } else {
                 if (millis() - dhtRecoveryTime >= 30000) {
-                    Serial.println("[SENSOR] DHT22: tentando recuperação...");
+                    Serial.println("[sensor] DHT22: tentando recuperação...");
                     dht.begin();
                     delay(500);
                     float testTemp = dht.readTemperature();
@@ -163,13 +166,13 @@ void SensorController::update() {
                         dhtFailCount = 0;
                         temperature  = testTemp;
                         humidity     = testHum;
-                        Serial.println("[SENSOR] DHT22: RECUPERADO com sucesso");
+                        Serial.println("[sensor] DHT22: RECUPERADO com sucesso");
                         if (ccsOK) {
                             ccs.setEnvironmentalData(humidity, temperature);
                         }
                     } else {
                         dhtRecoveryTime = millis();
-                        Serial.println("[SENSOR] DHT22: recuperação falhou, nova tentativa em 30s");
+                        Serial.println("[sensor] DHT22: recuperação falhou, nova tentativa em 30s");
                     }
                 }
             }
@@ -185,35 +188,35 @@ void SensorController::update() {
                         ccsFailCount = 0;
                     } else {
                         ccsFailCount++;
-                        Serial.printf("[SENSOR] CCS811: falha na leitura código %u (%d/3)\n", st, ccsFailCount);
+                        Serial.printf("[sensor] CCS811: falha na leitura código %u (%d/3)\n", st, ccsFailCount);
 
                         if (ccsFailCount >= 3) {
                             ccsOK           = false;
                             ccsRecoveryTime = millis();
-                            Serial.println("[SENSOR] CCS811: INOPERANTE — tentativa de recuperação em 30s");
+                            Serial.println("[sensor] CCS811: INOPERANTE — tentativa de recuperação em 30s");
                         }
                     }
                 }
             } else {
                 if (millis() - ccsRecoveryTime >= 30000) {
-                    Serial.println("[SENSOR] CCS811: tentando recuperação...");
+                    Serial.println("[sensor] CCS811: tentando recuperação...");
                     if (ccs.begin()) {
                         unsigned long t = millis();
                         while (!ccs.available() && millis() - t < 3000) delay(100);
                         if (ccs.available()) {
                             ccsFailCount = 0;
                             ccsOK        = true;
-                            Serial.println("[SENSOR] CCS811: RECUPERADO com sucesso");
+                            Serial.println("[sensor] CCS811: RECUPERADO com sucesso");
                             if (dhtOK) {
                                 ccs.setEnvironmentalData(humidity, temperature);
                             }
                         } else {
                             ccsRecoveryTime = millis();
-                            Serial.println("[SENSOR] CCS811: recuperação falhou, nova tentativa em 30s");
+                            Serial.println("[sensor] CCS811: recuperação falhou, nova tentativa em 30s");
                         }
                     } else {
                         ccsRecoveryTime = millis();
-                        Serial.println("[SENSOR] CCS811: recuperação falhou, nova tentativa em 30s");
+                        Serial.println("[sensor] CCS811: recuperação falhou, nova tentativa em 30s");
                     }
                 }
             }
@@ -232,13 +235,13 @@ void SensorController::update() {
 
         if (readCount % 5 == 0) {
             float voltage = (waterSensorValue / 4095.0) * 3.3;
-            Serial.printf("[SENSOR] Água: %d (%1.2fV) -> %s\n",
+            Serial.printf("[sensor] Água: %d (%1.2fV) -> %s\n",
                          waterSensorValue, voltage,
                          waterLevel ? "BAIXA" : "OK");
         }
 
         if (readCount % 10 == 0) {
-            Serial.printf("[SENSOR] DHT22: %.1fC, %.1f%%, LDR: %d, CO: %d ppm, CCS811: %d ppm CO2\n",
+            Serial.printf("[sensor] DHT22: %.1fC, %.1f%%, LDR: %d, CO: %d ppm, CCS811: %d ppm CO2\n",
                          temperature, humidity, light, co, co2);
         }
 

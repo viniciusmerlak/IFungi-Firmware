@@ -65,7 +65,7 @@ void LEDScheduler::update(unsigned long currentTimestamp, bool debugMode) {
 
     // Valida janela
     if (endMinutes <= startMinutes) {
-        Serial.println("[LED_SCHED] ⚠️ Horário de fim <= horário de início, scheduler ignorado.");
+        Serial.println("[led] WARN: Horario de fim <= horario de inicio, scheduler ignorado.");
         _ledsOn    = false;
         _intensity = 0;
         return;
@@ -85,7 +85,7 @@ void LEDScheduler::update(unsigned long currentTimestamp, bool debugMode) {
 
         static int lastReportedMin = -1;
         if (nowMinutes != lastReportedMin) {
-            Serial.printf("[LED_SCHED] Solar: %02d:%02d | Janela: %02d:%02d-%02d:%02d | "
+            Serial.printf("[led] Solar: %02d:%02d | Janela: %02d:%02d-%02d:%02d | "
                           "Intensidade: %d/255 (%d%%)\n",
                           nowHour, nowMinute,
                           onHour, onMinute, offHour, offMinute,
@@ -107,7 +107,7 @@ void LEDScheduler::update(unsigned long currentTimestamp, bool debugMode) {
 
         static int lastReportedMinTimer = -1;
         if (nowMinutes != lastReportedMinTimer) {
-            Serial.printf("[LED_SCHED] Timer: %02d:%02d | Janela: %02d:%02d-%02d:%02d | "
+            Serial.printf("[led] Timer: %02d:%02d | Janela: %02d:%02d-%02d:%02d | "
                           "%s (int: %d)\n",
                           nowHour, nowMinute,
                           onHour, onMinute, offHour, offMinute,

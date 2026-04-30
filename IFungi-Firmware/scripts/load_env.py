@@ -76,7 +76,7 @@ def load_env(path):
                 continue
 
             if "=" not in line:
-                print(f"[load_env] ⚠️  Linha {line_num} ignorada (sem '='): {line}")
+                print(f"[load_env] WARN Linha {line_num} ignorada (sem '='): {line}")
                 continue
 
             key, _, value = line.partition("=")
@@ -153,12 +153,12 @@ for key, value in variables.items():
 
 env.Append(CPPDEFINES=[], CCFLAGS=defines)
 
-print(f"[load_env] ✅ {len(defines)} variáveis injetadas do .env")
+print(f"[load_env] OK {len(defines)} variaveis injetadas do .env")
 for d in defines:
     key_part = d.split("=")[0].replace("-D", "")
-    print(f"           → {key_part} ✓")
+    print(f"           -> {key_part} [ok]")
 
 if blocked:
-    print(f"[load_env] 🔒 {len(blocked)} variável(eis) BLOQUEADA(S) (não compiladas no binário):")
+    print(f"[load_env] BLOCKED {len(blocked)} variavel(eis) (nao compiladas no binario):")
     for b in blocked:
-        print(f"           → {b} ✗ (runtime-only — inserida via portal WiFiManager)")
+        print(f"           -> {b} [blocked] (runtime-only - inserida via portal WiFiManager)")

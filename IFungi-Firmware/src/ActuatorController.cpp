@@ -49,10 +49,10 @@ void ActuatorController::setFirebaseWriteBlock(bool block) {
     if (block) {
         blockFirebaseWrite = true;
         firebaseWriteBlockTime = millis();
-        Serial.println("🔒 Firebase write BLOCKED for manual control");
+        Serial.println("[debug] Firebase write BLOCKED for manual control");
     } else {
         blockFirebaseWrite = false;
-        Serial.println("🔓 Firebase write UNBLOCKED");
+        Serial.println("[debug] Firebase write UNBLOCKED");
     }
 }
 
@@ -63,7 +63,7 @@ bool ActuatorController::canWriteToFirebase() {
     
     if (millis() - firebaseWriteBlockTime > FIREBASE_WRITE_BLOCK_DURATION) {
         blockFirebaseWrite = false;
-        Serial.println("🔓 Firebase write auto-UNBLOCKED (timeout)");
+        Serial.println("[debug] Firebase write auto-UNBLOCKED (timeout)");
         return true;
     }
     
@@ -77,7 +77,7 @@ bool ActuatorController::canWriteToFirebase() {
 void ActuatorController::saveSetpointsNVS() {
     Preferences preferences;
     if(!preferences.begin("setpoints", false)) {
-        Serial.println("❌ Error opening NVS to save setpoints!");
+        Serial.println("[nvs] Error opening NVS to save setpoints");
         return;
     }
     
@@ -91,13 +91,13 @@ void ActuatorController::saveSetpointsNVS() {
     preferences.putInt("tvocsSp", tvocsSetpoint);
     
     preferences.end();
-    Serial.println("💾 Setpoints saved to NVS");
+    Serial.println("[nvs] Setpoints saved to NVS");
 }
 
 bool ActuatorController::loadSetpointsNVS() {
     Preferences preferences;
     if(!preferences.begin("setpoints", true)) {
-        Serial.println("❌ Setpoints NVS not found, using defaults");
+        Serial.println("[nvs] Setpoints NVS not found, using defaults");
         return false;
     }
     
@@ -112,11 +112,11 @@ bool ActuatorController::loadSetpointsNVS() {
         tvocsSetpoint = preferences.getInt("tvocsSp", 100);
         
         preferences.end();
-        Serial.println("📁 Setpoints loaded from NVS");
+        Serial.println("[nvs] Setpoints loaded from NVS");
         return true;
     } else {
         preferences.end();
-        Serial.println("❌ No setpoints saved in NVS, using defaults");
+        Serial.println("[nvs] No setpoints saved in NVS, using defaults");
         return false;
     }
 }
@@ -134,7 +134,7 @@ const float HYSTERESIS_HUMIDITY = 2.0f;
 
 void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRelay2, 
                                uint8_t pinRelay3, uint8_t pinRelay4, uint8_t servoPin) {
-    Serial.println("🔧 Initializing ActuatorController...");
+    Serial.println("[init] Initializing ActuatorController...");
     
     _pinLED    = pinLED;
     _pinRelay1 = pinRelay1;
@@ -181,12 +181,13 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRel
         1
     );
     
-    Serial.println("✅ ActuatorController initialized successfully");
+    loadLEDScheduleNVS();
+    Serial.println("[init] ActuatorController initialized successfully");
 }
 
 void ActuatorController::setFirebaseHandler(FirebaseHandler* handler) {
     firebaseHandler = handler;
-    Serial.println("🔥 FirebaseHandler set for ActuatorController");
+    Serial.println("[init] FirebaseHandler set for ActuatorController");
 }
 
 // =============================================================================
@@ -228,7 +229,7 @@ void ActuatorController::applySetpoints(int lux, float tMin, float tMax,
     // Persiste na NVS somente quando houve mudança real
     saveSetpointsNVS();
     
-    Serial.printf("⚙️ Setpoints ATUALIZADOS: Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n", 
+    Serial.printf("[setpoints] Atualizados: Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n",
                  lux, tMin, tMax, uMin, uMax, coSp, co2Sp, tvocsSp);
 }
 
@@ -247,7 +248,7 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
     _currentMode = mode;
     ModePreset p = getModePreset(mode);
 
-    Serial.printf("[MODE] 🍄 Mudando para modo: %s\n", operationModeLabel(mode).c_str());
+    Serial.printf("[mode] Mudando para modo: %s\n", operationModeLabel(mode).c_str());
 
     // Aplica restrições de atuadores do modo
     _humidifierAllowed = p.humidifierEnabled;
@@ -265,7 +266,7 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
         ledScheduler.scheduleEnabled = false;
         ledScheduler.solarSimEnabled = false;
         controlLEDs(false, 0);
-        Serial.println("[MODE] LEDs desativados pelo modo de operação");
+        Serial.println("[mode] LEDs desativados pelo modo de operação");
     } else if (p.schedulerActive) {
         ledScheduler.scheduleEnabled = !p.solarSim;
         ledScheduler.solarSimEnabled = p.solarSim;
@@ -274,7 +275,7 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
         ledScheduler.offHour         = p.ledOffHour;
         ledScheduler.offMinute       = p.ledOffMinute;
         ledScheduler.configIntensity = p.ledIntensity;
-        Serial.printf("[MODE] Scheduler: %02d:%02d - %02d:%02d (%s)\n",
+        Serial.printf("[mode] Scheduler: %02d:%02d - %02d:%02d (%s)\n",
                       p.ledOnHour, p.ledOnMinute, p.ledOffHour, p.ledOffMinute,
                       p.solarSim ? "solar" : "timer fixo");
     }
@@ -283,19 +284,19 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
     if (!p.humidifierEnabled && humidifierOn) {
         controlRelay(3, false);
         humidifierOn = false;
-        Serial.println("[MODE] Umidificador desligado pelo modo");
+        Serial.println("[mode] Umidificador desligado pelo modo");
     }
     if (!p.peltierEnabled && peltierActive) {
         controlPeltier(false, false);
-        Serial.println("[MODE] Peltier desligado pelo modo");
+        Serial.println("[mode] Peltier desligado pelo modo");
     }
     if (p.exhaustForcedOn) {
         myServo.write(openPosition);
         controlRelay(4, true);
-        Serial.println("[MODE] Exaustor forçado LIGADO pelo modo");
+        Serial.println("[mode] Exaustor forçado LIGADO pelo modo");
     }
 
-    Serial.printf("[MODE] ✅ Modo %s aplicado\n", operationModeLabel(mode).c_str());
+    Serial.printf("[mode] Modo %s aplicado\n", operationModeLabel(mode).c_str());
 }
 
 // =============================================================================
@@ -314,7 +315,7 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
 
     if (currentPeltierMode == HEATING && peltierActive && peltierHeatingStart > 0 &&
         (millis() - peltierHeatingStart >= operationTime)) {
-        Serial.println("🛑 [PEL] Limite de aquecimento contínuo — desligando (cooldown)");
+        Serial.println("[peltier] Limite de aquecimento contínuo — desligando (cooldown)");
         controlPeltier(false, false);
         inCooldown    = true;
         cooldownStart = millis();
@@ -331,16 +332,16 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
 
         if (wantHeat) {
             if (!peltierActive || currentPeltierMode != HEATING) {
-                Serial.printf("🔥 [ACTUATOR] Temp abaixo (%.1f < %.1f), aquecendo\n", temp, tempMin);
+                Serial.printf("[actuator] Temp abaixo (%.1f < %.1f), aquecendo\n", temp, tempMin);
                 controlPeltier(false, true);
             }
         } else if (wantCool) {
             if (!peltierActive || currentPeltierMode != COOLING) {
-                Serial.printf("❄️ [ACTUATOR] Temp acima (%.1f > %.1f), resfriando\n", temp, tempMax);
+                Serial.printf("[actuator] Temp acima (%.1f > %.1f), resfriando\n", temp, tempMax);
                 controlPeltier(true, true);
             }
         } else if (peltierActive) {
-            Serial.println("✅ [ACTUATOR] Temp OK, desligando Peltier");
+            Serial.println("[actuator] Temp OK, desligando Peltier");
             controlPeltier(false, false);
         }
     }
@@ -353,7 +354,7 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
         }
     } else if (waterLevel) {
         // waterLevel = true → água BAIXA → desliga por segurança
-        Serial.println("🛑 [SAFETY] Nível de água baixo, desligando umidificador");
+        Serial.println("[safety] Nível de água baixo, desligando umidificador");
         if (humidifierOn) {
             controlRelay(3, false);
             humidifierOn = false;
@@ -361,13 +362,13 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
     } else {
         if (humidity < (humidityMin - HYSTERESIS_HUMIDITY)) {
             if (!humidifierOn) {
-                Serial.printf("💧 [ACTUATOR] Umidade baixa (%.1f < %.1f), ligando\n", humidity, humidityMin);
+                Serial.printf("[actuator] Umidade baixa (%.1f < %.1f), ligando\n", humidity, humidityMin);
                 controlRelay(3, true);
                 humidifierOn = true;
             }
         } else if (humidity > (humidityMax + HYSTERESIS_HUMIDITY)) {
             if (humidifierOn) {
-                Serial.printf("💧 [ACTUATOR] Umidade alta (%.1f > %.1f), desligando\n", humidity, humidityMax);
+                Serial.printf("[actuator] Umidade alta (%.1f > %.1f), desligando\n", humidity, humidityMax);
                 controlRelay(3, false);
                 humidifierOn = false;
             }
@@ -405,7 +406,7 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
         myServo.write(openPosition);
         controlRelay(4, true);
     } else if (co > coSetpoint || co2 > co2Setpoint || tvocs > tvocsSetpoint) {
-        Serial.printf("💨 [ACTUATOR] Gases acima do limite (CO:%d CO2:%d TVOCs:%d)\n", co, co2, tvocs);
+        Serial.printf("[actuator] Gases acima do limite (CO:%d CO2:%d TVOCs:%d)\n", co, co2, tvocs);
         myServo.write(openPosition);
         controlRelay(4, true);
     } else {
@@ -432,7 +433,7 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
                 relay2State = false;
                 stateChanged = true;
                 peltierHeatingStart = 0;
-                Serial.println("❄️ [ATUADOR] Peltier: resfriamento (R1 on, R2 off)");
+                Serial.println("[actuator] Peltier: resfriamento (R1 on, R2 off)");
             }
         } else {
             // R1 ligado + R2 ligado = aquecer (polaridade B)
@@ -444,7 +445,7 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
                 relay2State = true;
                 stateChanged = true;
                 peltierHeatingStart = millis();
-                Serial.println("🔥 [ATUADOR] Peltier: aquecimento (R1 on, R2 on)");
+                Serial.println("[actuator] Peltier: aquecimento (R1 on, R2 on)");
             }
         }
         peltierActive   = true;
@@ -459,7 +460,7 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
             relay2State        = false;
             peltierHeatingStart = 0;
             stateChanged       = true;
-            Serial.println("⭕ [ATUADOR] Peltier: DESLIGADO (R1/R2 off)");
+            Serial.println("[actuator] Peltier: DESLIGADO (R1/R2 off)");
         }
     }
     
@@ -488,9 +489,9 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
         targetLEDIntensity = newTarget;
         stateChanged = true;
         if (newTarget > 0) {
-            Serial.printf("💡 [ATUADOR] LEDs LIGADO (task), alvo: %d/255\n", newTarget);
+            Serial.printf("[led] LEDs LIGADO (task), alvo: %d/255\n", newTarget);
         } else {
-            Serial.println("💡 [ATUADOR] LEDs DESLIGADO (task)");
+            Serial.println("[led] LEDs DESLIGADO (task)");
         }
     }
     
@@ -536,7 +537,7 @@ void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
     }
     
     if (stateChanged) {
-        Serial.printf("🔌 [ATUADOR] Rele %d: %s\n", relayNumber, state ? "LIGADO" : "DESLIGADO");
+        Serial.printf("[actuator] Rele %d: %s\n", relayNumber, state ? "LIGADO" : "DESLIGADO");
         
         if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
             firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
@@ -603,7 +604,7 @@ int ActuatorController::getRelayState(uint8_t relayNumber) const {
 void ActuatorController::setDebugMode(bool debug) {
     if (debug != debugMode) {
         debugMode = debug;
-        Serial.println(debugMode ? "🔧 DEBUG MODE: ON" : "🔧 DEBUG MODE: OFF");
+        Serial.println(debugMode ? "[debug] DEBUG MODE: ON" : "[debug] DEBUG MODE: OFF");
         
         if (debugMode) {
             setFirebaseWriteBlock(true);
@@ -630,26 +631,26 @@ void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, 
         digitalWrite(_pinRelay1, relay1 ? HIGH : LOW);
         relay1State = relay1;
         anyChange   = true;
-        Serial.printf("🔧 [MANUAL] Relay 1: %s\n", relay1 ? "ON" : "OFF");
+        Serial.printf("[debug] Relay 1: %s\n", relay1 ? "ON" : "OFF");
     }
     if (relay2 != relay2State) {
         digitalWrite(_pinRelay2, relay2 ? HIGH : LOW);
         relay2State = relay2;
         anyChange   = true;
-        Serial.printf("🔧 [MANUAL] Relay 2: %s\n", relay2 ? "ON" : "OFF");
+        Serial.printf("[debug] Relay 2: %s\n", relay2 ? "ON" : "OFF");
     }
     if (relay3 != relay3State) {
         digitalWrite(_pinRelay3, relay3 ? HIGH : LOW);
         relay3State       = relay3;
         this->humidifierOn = relay3;
         anyChange         = true;
-        Serial.printf("🔧 [MANUAL] Relay 3 (Humidifier): %s\n", relay3 ? "ON" : "OFF");
+        Serial.printf("[debug] Relay 3 (Humidifier): %s\n", relay3 ? "ON" : "OFF");
     }
     if (relay4 != relay4State) {
         digitalWrite(_pinRelay4, relay4 ? HIGH : LOW);
         relay4State = relay4;
         anyChange   = true;
-        Serial.printf("🔧 [MANUAL] Relay 4: %s\n", relay4 ? "ON" : "OFF");
+        Serial.printf("[debug] Relay 4: %s\n", relay4 ? "ON" : "OFF");
     }
 
     int requestedIntensity = ledsOn ? ledsIntensity : 0;
@@ -658,11 +659,11 @@ void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, 
     if (requestedIntensity != targetLEDIntensity) {
         controlLEDs(requestedIntensity > 0, requestedIntensity);
         anyChange = true;
-        Serial.printf("🔧 [MANUAL] LEDs: %s, Alvo: %d/255\n", requestedIntensity > 0 ? "ON" : "OFF", requestedIntensity);
+        Serial.printf("[debug] LEDs: %s, Alvo: %d/255\n", requestedIntensity > 0 ? "ON" : "OFF", requestedIntensity);
     }
     
     if (anyChange) {
-        Serial.println("✅ Manual changes applied successfully");
+        Serial.println("[debug] Manual changes applied successfully");
     }
 }
 
@@ -680,36 +681,36 @@ void ActuatorController::setDevModeSettings(bool analogRead, bool digitalWrite, 
 
 void ActuatorController::executeDevModeOperations() {
     if (devModePin < 0 || devModePin > 39) {
-        Serial.println("❌ [DEVMODE] ERRO - Pino inválido: " + String(devModePin));
+        Serial.println("[debug] ERRO - Pino inválido: " + String(devModePin));
         return;
     }
 
     const int criticalPins[] = {0, 1, 3, 6, 7, 8, 9, 10, 11};
     for (int cp : criticalPins) {
         if (devModePin == cp) {
-            Serial.printf("🚫 [DEVMODE] BLOQUEADO - GPIO%d é pino crítico\n", devModePin);
+            Serial.printf("[debug] BLOQUEADO - GPIO%d é pino crítico\n", devModePin);
             return;
         }
     }
     
     if (devModeAnalogRead) {
         int analogValue = analogRead(devModePin);
-        Serial.printf("🔬 [DEVMODE] Analog Read - Pin %d: %d\n", devModePin, analogValue);
+        Serial.printf("[debug] Analog Read - Pin %d: %d\n", devModePin, analogValue);
     }
     
     if (devModeDigitalWrite) {
         digitalWrite(devModePin, devModePWMValue > 0 ? HIGH : LOW);
-        Serial.printf("🔬 [DEVMODE] Digital Write - Pin %d: %s\n", 
+        Serial.printf("[debug] Digital Write - Pin %d: %s\n", 
                      devModePin, devModePWMValue > 0 ? "HIGH" : "LOW");
     }
     
     if (devModePWM && !devModeDigitalWrite) {
         if (devModePWMValue < 0 || devModePWMValue > 255) {
-            Serial.println("❌ [DEVMODE] Valor PWM inválido: " + String(devModePWMValue));
+            Serial.println("[debug] Valor PWM inválido: " + String(devModePWMValue));
             return;
         }
         analogWrite(devModePin, devModePWMValue);
-        Serial.printf("🔬 [DEVMODE] PWM Write - Pin %d: %d/255\n", devModePin, devModePWMValue);
+        Serial.printf("[debug] PWM Write - Pin %d: %d/255\n", devModePin, devModePWMValue);
     }
 }
 
@@ -718,7 +719,7 @@ void ActuatorController::handleDevMode() {
         if (lastDevModeState) {
             if (devModePin >= 0) {
                 pinMode(devModePin, INPUT);
-                Serial.printf("🔬 [DEVMODE] Pino %d resetado para INPUT\n", devModePin);
+                Serial.printf("[debug] Pino %d resetado para INPUT\n", devModePin);
             }
             lastDevModeState = false;
         }
@@ -726,7 +727,7 @@ void ActuatorController::handleDevMode() {
     }
     
     if (!lastDevModeState) {
-        Serial.println("🔬 [DEVMODE] Modo desenvolvimento ATIVADO");
+        Serial.println("[debug] Modo desenvolvimento ATIVADO");
         lastDevModeState = true;
         
         if (devModePin >= 0 && devModePin <= 39) {
@@ -747,10 +748,105 @@ void ActuatorController::handleDevMode() {
 
 void ActuatorController::applyLEDSchedule(unsigned long ts) {
     ledScheduler.update(ts, debugMode);
+    persistLEDScheduleIfChanged();
     if (ledScheduler.isActive() && !debugMode) {
         int schedIntensity = ledScheduler.wantsLEDsOn() ? ledScheduler.getIntensity() : 0;
         if (schedIntensity != currentLEDIntensity) {
             controlLEDs(schedIntensity > 0, schedIntensity);
         }
     }
+}
+
+void ActuatorController::saveLEDScheduleNVS() {
+    Preferences preferences;
+    if (!preferences.begin("led-sched", false)) {
+        Serial.println("[led] Failed opening NVS to save led_schedule");
+        return;
+    }
+
+    preferences.putBool("schEn", ledScheduler.scheduleEnabled);
+    preferences.putBool("solEn", ledScheduler.solarSimEnabled);
+    preferences.putInt("onH", ledScheduler.onHour);
+    preferences.putInt("onM", ledScheduler.onMinute);
+    preferences.putInt("offH", ledScheduler.offHour);
+    preferences.putInt("offM", ledScheduler.offMinute);
+    preferences.putInt("int", ledScheduler.configIntensity);
+    preferences.putUInt("rev", millis()); // marker only
+    preferences.end();
+}
+
+bool ActuatorController::loadLEDScheduleNVS() {
+    Preferences preferences;
+    if (!preferences.begin("led-sched", true)) {
+        return false;
+    }
+
+    if (!preferences.isKey("schEn")) {
+        preferences.end();
+        return false;
+    }
+
+    ledScheduler.scheduleEnabled = preferences.getBool("schEn", false);
+    ledScheduler.solarSimEnabled = preferences.getBool("solEn", false);
+    ledScheduler.onHour = preferences.getInt("onH", 6);
+    ledScheduler.onMinute = preferences.getInt("onM", 0);
+    ledScheduler.offHour = preferences.getInt("offH", 20);
+    ledScheduler.offMinute = preferences.getInt("offM", 0);
+    ledScheduler.configIntensity = preferences.getInt("int", 255);
+    preferences.end();
+
+    _loadedScheduleFromNvs = true;
+    Serial.printf("[led] Restored led_schedule from NVS (%s%s %02d:%02d-%02d:%02d int=%d)\n",
+                  ledScheduler.scheduleEnabled ? "timer " : "",
+                  ledScheduler.solarSimEnabled ? "solar " : "off ",
+                  ledScheduler.onHour, ledScheduler.onMinute,
+                  ledScheduler.offHour, ledScheduler.offMinute,
+                  ledScheduler.configIntensity);
+    return true;
+}
+
+void ActuatorController::persistLEDScheduleIfChanged() {
+    static bool lastScheduleEnabled = false;
+    static bool lastSolarEnabled = false;
+    static int lastOnHour = -1;
+    static int lastOnMinute = -1;
+    static int lastOffHour = -1;
+    static int lastOffMinute = -1;
+    static int lastIntensity = -1;
+    static bool initialized = false;
+
+    if (!initialized) {
+        initialized = true;
+        lastScheduleEnabled = ledScheduler.scheduleEnabled;
+        lastSolarEnabled = ledScheduler.solarSimEnabled;
+        lastOnHour = ledScheduler.onHour;
+        lastOnMinute = ledScheduler.onMinute;
+        lastOffHour = ledScheduler.offHour;
+        lastOffMinute = ledScheduler.offMinute;
+        lastIntensity = ledScheduler.configIntensity;
+        if (_loadedScheduleFromNvs) {
+            return;
+        }
+    }
+
+    bool changed = false;
+    if (lastScheduleEnabled != ledScheduler.scheduleEnabled) changed = true;
+    if (lastSolarEnabled != ledScheduler.solarSimEnabled) changed = true;
+    if (lastOnHour != ledScheduler.onHour) changed = true;
+    if (lastOnMinute != ledScheduler.onMinute) changed = true;
+    if (lastOffHour != ledScheduler.offHour) changed = true;
+    if (lastOffMinute != ledScheduler.offMinute) changed = true;
+    if (lastIntensity != ledScheduler.configIntensity) changed = true;
+
+    if (!changed) return;
+
+    lastScheduleEnabled = ledScheduler.scheduleEnabled;
+    lastSolarEnabled = ledScheduler.solarSimEnabled;
+    lastOnHour = ledScheduler.onHour;
+    lastOnMinute = ledScheduler.onMinute;
+    lastOffHour = ledScheduler.offHour;
+    lastOffMinute = ledScheduler.offMinute;
+    lastIntensity = ledScheduler.configIntensity;
+
+    saveLEDScheduleNVS();
 }

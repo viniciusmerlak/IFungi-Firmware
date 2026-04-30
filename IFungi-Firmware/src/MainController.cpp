@@ -201,6 +201,8 @@ void lifeSupportTask(void * parameter) {
         }
 
         if (now - lastActTs > ACTUATOR_CONTROL_INTERVAL) {
+            // Keep LED schedule behavior consistent during captive portal / boot fallback.
+            actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
             actuators.controlAutomatically(
                 sensors.getTemperature(),
                 sensors.getHumidity(),
@@ -252,7 +254,7 @@ void handleDebugAndCalibration() {
             actuators.setDebugMode(currentDebugMode);
             lastDebugMode = currentDebugMode;
             
-            Serial.println(currentDebugMode ? "🔧 DEBUG MODE ENABLED" : "🔧 DEBUG MODE DISABLED");
+            Serial.println(currentDebugMode ? "[debug] DEBUG MODE ENABLED" : "[debug] DEBUG MODE DISABLED");
             
             // Ao sair do modo debug, sincroniza estados com Firebase
             if (!currentDebugMode && firebase.isAuthenticated()) {
@@ -266,7 +268,7 @@ void handleDebugAndCalibration() {
                     actuators.getLEDsWatts(),
                     actuators.isHumidifierOn()
                 );
-                Serial.println("🔄 Updated actuator states after exiting debug mode");
+                Serial.println("[debug] Updated actuator states after exiting debug mode");
             }
         }
         
@@ -298,9 +300,9 @@ void handleDebugAndCalibration() {
                 relay2 = false;
                 String fixPath = "/greenhouses/" + firebase.greenhouseId + "/manual_actuators/rele2";
                 if (Firebase.setBool(firebase.fbdo, fixPath.c_str(), false)) {
-                    Serial.println("🛡️ [MANUAL] Correção aplicada: rele2->false (rele1 estava false)");
+                    Serial.println("[debug] Correção aplicada: rele2->false (rele1 estava false)");
                 } else {
-                    Serial.println("⚠️ [MANUAL] Falha ao corrigir rele2 inválido no Firebase");
+                    Serial.println("[debug] Falha ao corrigir rele2 inválido no Firebase");
                 }
             }
             
@@ -312,7 +314,7 @@ void handleDebugAndCalibration() {
             
             // Aplica mudanças se detectadas
             if (hasChanges) {
-                Serial.println("🔄 Manual states changed, applying...");
+                Serial.println("[debug] Manual states changed, applying...");
                 actuators.setManualStates(relay1, relay2, relay3, relay4, 
                                         ledsOn, ledsIntensity, humidifierOn);
                 
@@ -428,7 +430,7 @@ void setupLEDTask() {
         0                  // Core (0)
     );
     
-    Serial.println("✅ LED task initialized");
+    Serial.println("[init] LED task initialized");
 }
 
 // =============================================================================
@@ -453,7 +455,7 @@ void setupLEDTask() {
  * @see ActuatorController::setFirebaseHandler()
  */
 void setupSensorsAndActuators() {
-    Serial.println("🔧 Initializing sensors and actuators...");
+    Serial.println("[init] Initializing sensors and actuators...");
     
     // Inicialização dos sensores
     sensors.begin();
@@ -464,14 +466,14 @@ void setupSensorsAndActuators() {
     
     // Carrega setpoints do NVS ou usa valores padrão
     if (!actuators.loadSetpointsNVS()) {
-        Serial.println("⚙️ Using default setpoints");
+        Serial.println("[init] Using default setpoints");
         actuators.applySetpoints(5000, 20.0, 30.0, 60.0, 80.0, 50, 400, 100);
     }
     
     // Conecta atuadores ao handler do Firebase para sincronização
     actuators.setFirebaseHandler(&firebase);
     
-    Serial.println("✅ Sensors and actuators initialized");
+    Serial.println("[init] Sensors and actuators initialized");
 }
 
 // =============================================================================
@@ -500,16 +502,16 @@ void setupSensorsAndActuators() {
  * @see FirebaseHandler::sendHeartbeat()
  */
 void setupWiFiAndFirebase() {
-    Serial.println("🌐 Iniciando configuração de rede...");
+    Serial.println("[wifi] Iniciando configuracao de rede...");
     
     // Configuração do WiFiManager
     wifiManager.setConfigPortalTimeout(180); // 3 minutos para configurar
     wifiManager.setConnectTimeout(30); // 30 segundos para conectar
     wifiManager.setDebugOutput(true);
     wifiManager.setSTAStaticIPConfig(STATIC_IP, STATIC_GW, STATIC_MASK, STATIC_DNS1);
-    Serial.println("🌐 WiFi STA configurado para IP estático");
+    Serial.println("[wifi] WiFi STA configurado para IP estatico");
     wifiManager.setSaveConfigCallback([]() {
-        Serial.println("✅ Configuração salva via portal web");
+        Serial.println("[wifi] Configuracao salva via portal web");
     });
 
     // Parâmetros customizados para credenciais Firebase
@@ -522,7 +524,7 @@ void setupWiFiAndFirebase() {
     wifiManager.addParameter(&custom_password);
 
     // Tentativa de conexão automática ou inicia portal de configuração
-    Serial.println("📡 Tentando conectar ao WiFi...");
+    Serial.println("[wifi] Tentando conectar ao WiFi...");
     
     bool wifiConnected = false;
     int wifiAttempts = 0;
@@ -534,26 +536,26 @@ void setupWiFiAndFirebase() {
         // AP name e senha do portal vêm do .env via IFUNGI_WIFI_AP_NAME / IFUNGI_WIFI_AP_PASSWORD
         if (wifiManager.autoConnect(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD)) {
             wifiConnected = true;
-            Serial.println("✅ WiFi conectado!");
-            Serial.println("📡 IP: " + WiFi.localIP().toString());
+            Serial.println("[wifi] WiFi conectado");
+            Serial.println("[wifi] IP: " + WiFi.localIP().toString());
             if (staticIpEnabled) {
-                Serial.println("🌐 Modo IP estático ativo");
+                Serial.println("[wifi] Modo IP estatico ativo");
             } else {
-                Serial.println("🌐 Modo DHCP ativo (fallback)");
+                Serial.println("[wifi] Modo DHCP ativo (fallback)");
             }
             break;
         } else {
             wifiAttempts++;
-            Serial.printf("❌ Falha na conexão WiFi (tentativa %d/%d)\n", wifiAttempts, MAX_WIFI_ATTEMPTS);
+            Serial.printf("[wifi] Falha na conexao WiFi (tentativa %d/%d)\n", wifiAttempts, MAX_WIFI_ATTEMPTS);
             
             if (wifiAttempts < MAX_WIFI_ATTEMPTS) {
                 if (staticIpEnabled) {
                     // Fallback seguro: se IP estático falhar, segunda tentativa via DHCP.
                     staticIpEnabled = false;
                     wifiManager.setSTAStaticIPConfig(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
-                    Serial.println("🔄 Fallback para DHCP na próxima tentativa");
+                    Serial.println("[wifi] Fallback para DHCP na proxima tentativa");
                 }
-                Serial.println("🔄 Tentando novamente em 5 segundos...");
+                Serial.println("[wifi] Tentando novamente em 5 segundos...");
                 delay(5000);
                 
                 // Reset WiFi entre tentativas
@@ -567,8 +569,8 @@ void setupWiFiAndFirebase() {
 
     // Fallback se todas as tentativas falharem
     if (!wifiConnected) {
-        Serial.println("💥 Todas as tentativas de conexão WiFi falharam");
-        Serial.println("🔄 Reiniciando em 5 segundos...");
+        Serial.println("[wifi] Todas as tentativas de conexao WiFi falharam");
+        Serial.println("[wifi] Reiniciando em 5 segundos...");
         delay(5000);
         ESP.restart();
         return;
@@ -576,9 +578,9 @@ void setupWiFiAndFirebase() {
 
     // Verificação da qualidade do sinal WiFi
     if (WiFi.RSSI() < -80) {
-        Serial.println("⚠️ Sinal WiFi fraco (RSSI: " + String(WiFi.RSSI()) + " dBm)");
+        Serial.println("[wifi] Sinal WiFi fraco (RSSI: " + String(WiFi.RSSI()) + " dBm)");
     } else {
-        Serial.println("📶 Sinal WiFi OK (RSSI: " + String(WiFi.RSSI()) + " dBm)");
+        Serial.println("[wifi] Sinal WiFi OK (RSSI: " + String(WiFi.RSSI()) + " dBm)");
     }
 
     // Processamento das credenciais do Firebase
@@ -588,7 +590,7 @@ void setupWiFiAndFirebase() {
 
     // Verifica se novas credenciais foram fornecidas via portal
     if (strlen(custom_email.getValue()) > 0 && strlen(custom_password.getValue()) > 0) {
-        Serial.println("🆕 Novas credenciais Firebase fornecidas via portal");
+        Serial.println("[firebase] Novas credenciais fornecidas via portal");
         email = String(custom_email.getValue());
         firebasePassword = String(custom_password.getValue());
         usingNewCredentials = true;
@@ -599,25 +601,25 @@ void setupWiFiAndFirebase() {
             preferences.putString("email", email);
             preferences.putString("password", firebasePassword);
             preferences.end();
-            Serial.println("💾 Novas credenciais salvas no NVS");
+            Serial.println("[firebase] Novas credenciais salvas no NVS");
         }
     } 
     // Tenta carregar credenciais salvas no NVS
     else if (firebase.loadFirebaseCredentials(email, firebasePassword)) {
-        Serial.println("📁 Usando credenciais Firebase salvas no NVS");
+        Serial.println("[firebase] Usando credenciais salvas no NVS");
         usingNewCredentials = false;
     } 
     // Nenhuma credencial disponível
     else {
-        Serial.println("❌ Nenhuma credencial Firebase disponível");
-        Serial.println("🌐 Por favor, acesse o portal web para configurar:");
+        Serial.println("[firebase] Nenhuma credencial disponivel");
+        Serial.println("[wifi] Por favor, acesse o portal web para configurar:");
         Serial.println("   http://" + WiFi.localIP().toString());
         Serial.println("   Ou reinicie e conecte ao AP 'IFungi-Config'");
         return;
     }
 
     // Processo de autenticação no Firebase
-    Serial.println("🔥 Iniciando autenticação no Firebase...");
+    Serial.println("[firebase] Iniciando autenticacao...");
     
     bool firebaseAuthenticated = false;
     int firebaseAttempts = 0;
@@ -626,14 +628,14 @@ void setupWiFiAndFirebase() {
     // Loop de tentativas de autenticação Firebase
     while (!firebaseAuthenticated && firebaseAttempts < MAX_FIREBASE_ATTEMPTS) {
         firebaseAttempts++;
-        Serial.printf("🔐 Tentativa %d/%d de autenticação Firebase...\n", 
+        Serial.printf("[firebase] Tentativa %d/%d de autenticacao...\n", 
                      firebaseAttempts, MAX_FIREBASE_ATTEMPTS);
 
         // Credenciais Firebase injetadas em build-time pelo .env
         // Em runtime, podem ser sobrescritas pelo portal WiFiManager ou NVS
         if (firebase.authenticate(email, firebasePassword)) {
             firebaseAuthenticated = true;
-            Serial.println("✅ Autenticação Firebase bem-sucedida!");
+            Serial.println("[firebase] Autenticacao bem-sucedida");
             
             // verifyGreenhouse() já é chamado internamente por authenticate().
             // Garante que o nó OTA existe (sem Firebase Storage)
@@ -646,19 +648,19 @@ void setupWiFiAndFirebase() {
             firebase.sendLocalData();
             break;
         } else {
-            Serial.printf("❌ Falha na autenticação Firebase (tentativa %d/%d)\n", 
+            Serial.printf("[firebase] Falha na autenticacao (tentativa %d/%d)\n", 
                          firebaseAttempts, MAX_FIREBASE_ATTEMPTS);
             
             // Análise de possíveis causas no primeiro erro
             if (firebaseAttempts == 1) {
-                Serial.println("💡 Possíveis causas:");
+                Serial.println("[firebase] Possiveis causas:");
                 Serial.println("   - Credenciais inválidas/expiradas");
                 Serial.println("   - Problema de conexão com a internet");
                 Serial.println("   - Servidor Firebase indisponível");
             }
             
             if (firebaseAttempts < MAX_FIREBASE_ATTEMPTS) {
-                Serial.println("🔄 Nova tentativa em 3 segundos...");
+                Serial.println("[firebase] Nova tentativa em 3 segundos...");
                 delay(3000);
             }
         }
@@ -666,48 +668,48 @@ void setupWiFiAndFirebase() {
 
     // Fallback para modo offline se autenticação falhar
     if (!firebaseAuthenticated) {
-        Serial.println("💥 Falha crítica: Não foi possível autenticar no Firebase");
+        Serial.println("[firebase] Falha critica: nao foi possivel autenticar");
         
         // Remove credenciais inválidas do NVS
         if (usingNewCredentials) {
-            Serial.println("🗑️ Removendo credenciais inválidas do NVS...");
+            Serial.println("[firebase] Removendo credenciais invalidas do NVS...");
             Preferences preferences;
             if (preferences.begin("firebase-creds", false)) {
                 preferences.clear();
                 preferences.end();
-                Serial.println("✅ Credenciais inválidas removidas");
+                Serial.println("[firebase] Credenciais invalidas removidas");
             }
         }
         
-        Serial.println("🌐 Por favor, reconfigure as credenciais via portal web:");
+        Serial.println("[wifi] Por favor, reconfigure as credenciais via portal web:");
         Serial.println("   http://" + WiFi.localIP().toString());
-        Serial.println("⚠️ O sistema funcionará em modo offline até a configuração");
+        Serial.println("[system] O sistema funcionara em modo offline ate a configuracao");
         
         // Não reinicia - permite operação offline
         return;
     }
 
     // Verificação final do estado do sistema
-    Serial.println("🔍 Verificando estado final do sistema...");
+    Serial.println("[system] Verificando estado final do sistema...");
     
     if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("✅ WiFi: CONECTADO");
+        Serial.println("[system] WiFi: CONECTADO");
     } else {
-        Serial.println("❌ WiFi: DESCONECTADO");
+        Serial.println("[system] WiFi: DESCONECTADO");
     }
     
     if (firebase.isAuthenticated()) {
-        Serial.println("✅ Firebase: AUTENTICADO");
+        Serial.println("[system] Firebase: AUTENTICADO");
     } else {
-        Serial.println("❌ Firebase: NÃO AUTENTICADO");
+        Serial.println("[system] Firebase: NAO AUTENTICADO");
     }
 
-    Serial.println("🎉 Configuração de rede e Firebase concluída!");
+    Serial.println("[system] Configuracao de rede e Firebase concluida");
     
     // Envia heartbeat inicial
     if (firebase.isAuthenticated()) {
         firebase.sendHeartbeat();
-        Serial.println("💓 Heartbeat inicial enviado");
+        Serial.println("[system] Heartbeat inicial enviado");
     }
 }
 
@@ -739,7 +741,7 @@ void saveDataLocally() {
             sensors.getTVOCs(),
             timestamp
         );
-        Serial.println("💾 Data saved locally (offline mode)");
+        Serial.println("[offline] Data saved locally (offline mode)");
     }
 }
 
@@ -766,12 +768,12 @@ void sendDataToHistory() {
         );
         
         if (sent) {
-            Serial.println("📊 Data sent to Firebase history");
+            Serial.println("[firebase] Data sent to Firebase history");
         } else {
-            Serial.println("❌ Failed to send data to history");
+            Serial.println("[firebase] Failed to send data to history");
         }
     } else {
-        Serial.println("📴 Offline mode - data will be saved locally");
+        Serial.println("[offline] Offline mode - data will be saved locally");
         saveDataLocally();
     }
 }
@@ -803,17 +805,17 @@ void verifyConnectionStatus() {
         bool up = (WiFi.status() == WL_CONNECTED);
 
         if (!up) {
-            Serial.println("⚠️ WiFi desconectado — WiFi.reconnect() (nova checagem em ~30s)");
+            Serial.println("[wifi] WiFi desconectado - WiFi.reconnect() (nova checagem em ~30s)");
             WiFi.reconnect();
         } else {
             if (!prevWifiUp) {
-                Serial.println("✅ WiFi reconectado — enviando dados locais pendentes (NVS)");
+                Serial.println("[wifi] WiFi reconectado - enviando dados locais pendentes (NVS)");
                 if (firebase.isAuthenticated()) {
                     firebase.sendLocalData();
                 }
             }
             if (firebase.isAuthenticated() && !Firebase.ready()) {
-                Serial.println("⚠️ Firebase não pronto — refreshTokenIfNeeded()");
+                Serial.println("[firebase] Firebase nao pronto - refreshTokenIfNeeded()");
                 firebase.refreshTokenIfNeeded();
             }
         }
@@ -894,6 +896,13 @@ void handleFirebase() {
             sensors.getLight(),
             sensors.getTVOCs(),
             sensors.getWaterLevel()
+        );
+        firebase.updateSensorHealth(
+            sensors.isDHTHealthy(),
+            sensors.isCCS811Healthy(),
+            sensors.isMQ7Healthy(),
+            sensors.isLDRHealthy(),
+            sensors.isWaterLevelHealthy()
         );
         
         // Atualiza estados dos atuadores no Firebase
@@ -1016,7 +1025,7 @@ void setup() {
     Serial.begin(115200);
     delay(1000);
     
-    Serial.println("\n\n[SISTEMA] Iniciando Sistema IFungi Greenhouse...");
+    Serial.println("\n\n[system] Iniciando Sistema IFungi Greenhouse...");
     
     // Inicialização das tarefas e componentes
     setupLEDTask();
@@ -1044,13 +1053,13 @@ void setup() {
 
     // Geração do ID único da estufa
     greenhouseID = "IFUNGI-" + getMacAddress();
-    Serial.println("[SISTEMA] ID da Estufa: " + greenhouseID);
+    Serial.println("[system] ID da Estufa: " + greenhouseID);
     qrGenerator.generateQRCode(greenhouseID);
 
     // ← OTA: inicializa o handler após WiFi/Firebase estarem prontos
     otaHandler.begin(&firebase, greenhouseID, FIRMWARE_VERSION, 60000);
 
-    Serial.println("[SISTEMA] Sistema inicializado e pronto para operação");
+    Serial.println("[system] Sistema inicializado e pronto para operação");
 }
 
 // =============================================================================

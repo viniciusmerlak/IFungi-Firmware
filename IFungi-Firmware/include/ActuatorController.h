@@ -91,6 +91,9 @@ public:
     // Agendador de LEDs (timer e simulação solar)
     LEDScheduler ledScheduler;                  ///< Instância pública — lida pelo Firebase
     void applyLEDSchedule(unsigned long ts);    ///< Aplica decisão do scheduler nos LEDs
+    void saveLEDScheduleNVS();
+    bool loadLEDScheduleNVS();
+    void persistLEDScheduleIfChanged();
 
     // Métodos para modo de desenvolvimento
     void setDevModeSettings(bool analogRead, bool digitalWrite, int pin, bool pwm, int pwmValue);
@@ -162,6 +165,7 @@ private:
     int devModePWMValue = 0;
     bool lastDevModeState = false;
     TaskHandle_t ledPwmTaskHandle = nullptr;
+    bool _loadedScheduleFromNvs = false;
 
     // Métodos privados
     void updateFirebaseState();

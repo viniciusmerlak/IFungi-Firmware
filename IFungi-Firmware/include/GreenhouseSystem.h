@@ -32,6 +32,7 @@ public:
     bool greenhouseExists(const String& greenhouseId);
     void verifyGreenhouse();
     void sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel);
+    void updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, bool ldrOk, bool waterOk);
     void receiveSetpoints(ActuatorController& actuators);
     bool loadFirebaseCredentials(String& email, String& password);
     void refreshTokenIfNeeded();

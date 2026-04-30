@@ -65,7 +65,7 @@ void OTAHandler::begin(FirebaseHandler* firebaseHandler,
     _lastCheck       = 0;
     _instance        = this;
 
-    Serial.printf("[OTA] Handler inicializado. Versão atual: %s | Intervalo: %lums\n",
+    Serial.printf("[ota] Handler inicializado. Versão atual: %s | Intervalo: %lums\n",
                   _currentVersion.c_str(), _checkInterval);
 }
 
@@ -85,17 +85,17 @@ void OTAHandler::handle() {
         _forceCheck  = false;
         _status      = CHECKING;
 
-        Serial.println("[OTA] Verificando atualizações no Firebase...");
+        Serial.println("[ota] Verificando atualizações no Firebase...");
 
         if (_checkForUpdate()) {
-            Serial.printf("[OTA] Nova versão disponível: %s → %s\n",
+            Serial.printf("[ota] Nova versao disponivel: %s -> %s\n",
                           _currentVersion.c_str(), _pendingVersion.c_str());
-            Serial.println("[OTA] Iniciando download...");
+            Serial.println("[ota] Iniciando download...");
 
             if (_downloadAndInstall(_pendingUrl)) {
                 // ESP.restart() chamado internamente — nunca chega aqui em sucesso
             } else {
-                Serial.println("[OTA] ❌ Falha na instalação. Sistema continua operando normalmente.");
+                Serial.println("[ota] ERROR: Falha na instalacao. Sistema continua operando.");
                 _reportResult(false);
                 _status = FAILED;
             }
@@ -107,7 +107,7 @@ void OTAHandler::handle() {
 
 void OTAHandler::checkNow() {
     _forceCheck = true;
-    Serial.println("[OTA] Verificação imediata agendada.");
+    Serial.println("[ota] Verificação imediata agendada.");
 }
 
 // =============================================================================
@@ -118,36 +118,36 @@ bool OTAHandler::_checkForUpdate() {
     String basePath = "/greenhouses/" + _greenhouseId + "/ota/";
 
     if (!Firebase.getBool(_firebase->fbdo, basePath + "available")) {
-        Serial.println("[OTA] Nó OTA não encontrado no Firebase (normal na primeira execução).");
+        Serial.println("[ota] Nó OTA não encontrado no Firebase (normal na primeira execução).");
         return false;
     }
 
     bool available = _firebase->fbdo.boolData();
     if (!available) {
-        Serial.println("[OTA] Nenhuma atualização disponível.");
+        Serial.println("[ota] Nenhuma atualização disponível.");
         return false;
     }
 
     if (!Firebase.getString(_firebase->fbdo, basePath + "version")) {
-        Serial.println("[OTA] ⚠️ Campo 'version' não encontrado no nó OTA.");
+        Serial.println("[ota] WARN: Campo 'version' nao encontrado no no OTA.");
         return false;
     }
     _pendingVersion = _firebase->fbdo.stringData();
 
     if (_pendingVersion == _currentVersion) {
-        Serial.printf("[OTA] Versão %s já instalada. Limpando flag...\n", _currentVersion.c_str());
+        Serial.printf("[ota] Versão %s já instalada. Limpando flag...\n", _currentVersion.c_str());
         Firebase.setBool(_firebase->fbdo, basePath + "available", false);
         return false;
     }
 
     if (!Firebase.getString(_firebase->fbdo, basePath + "url")) {
-        Serial.println("[OTA] ⚠️ Campo 'url' não encontrado no nó OTA.");
+        Serial.println("[ota] WARN: Campo 'url' nao encontrado no no OTA.");
         return false;
     }
     _pendingUrl = _firebase->fbdo.stringData();
 
     if (_pendingUrl.length() == 0) {
-        Serial.println("[OTA] ⚠️ URL vazia no nó OTA.");
+        Serial.println("[ota] WARN: URL vazia no no OTA.");
         return false;
     }
 
@@ -156,8 +156,8 @@ bool OTAHandler::_checkForUpdate() {
     // por um atacante na mesma rede (MITM). O ESP32 suporta TLS — não há
     // justificativa para aceitar HTTP em atualizações de firmware.
     if (!_pendingUrl.startsWith("https://")) {
-        Serial.println("[OTA] ❌ SEGURANÇA: URL rejeitada — deve começar com 'https://'");
-        Serial.println("[OTA]    URL recebida: " + _pendingUrl.substring(0, 40) + "...");
+        Serial.println("[ota] ERROR: URL rejeitada - deve comecar com 'https://'");
+        Serial.println("[ota]    URL recebida: " + _pendingUrl.substring(0, 40) + "...");
         // Limpa o campo de URL inválida e desativa a flag para não repetir
         Firebase.setString(_firebase->fbdo, basePath + "url", "");
         Firebase.setBool(_firebase->fbdo, basePath + "available", false);
@@ -207,8 +207,8 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
 
     client.setInsecure(); // veja nota no header desta função
 
-    Serial.println("[OTA] Conectando ao servidor...");
-    Serial.println("[OTA] URL: " + url.substring(0, 60) + (url.length() > 60 ? "..." : ""));
+    Serial.println("[ota] Conectando ao servidor...");
+    Serial.println("[ota] URL: " + url.substring(0, 60) + (url.length() > 60 ? "..." : ""));
 
     http.begin(client, url);
     http.setTimeout(30000);
@@ -217,7 +217,7 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     int httpCode = http.GET();
 
     if (httpCode != HTTP_CODE_OK) {
-        Serial.printf("[OTA] ❌ Erro HTTP: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
+        Serial.printf("[ota] ERROR HTTP: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
         http.end();
         return false;
     }
@@ -225,16 +225,16 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     int contentLength = http.getSize();
 
     if (contentLength <= 0) {
-        Serial.println("[OTA] ❌ Content-Length inválido ou ausente.");
+        Serial.println("[ota] ERROR: Content-Length invalido ou ausente.");
         http.end();
         return false;
     }
 
-    Serial.printf("[OTA] Tamanho do firmware: %d bytes (%.1f KB)\n",
+    Serial.printf("[ota] Tamanho do firmware: %d bytes (%.1f KB)\n",
                   contentLength, contentLength / 1024.0f);
 
     if (!Update.begin(contentLength, U_FLASH)) {
-        Serial.printf("[OTA] ❌ Erro ao iniciar Update: ");
+        Serial.printf("[ota] ERROR ao iniciar Update: ");
         Update.printError(Serial);
         http.end();
         return false;
@@ -249,13 +249,13 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     uint8_t buffer[BUFFER_SIZE];
     size_t written = 0;
 
-    Serial.println("[OTA] Gravando firmware na flash...");
+    Serial.println("[ota] Gravando firmware na flash...");
 
     while (http.connected() && written < (size_t)contentLength) {
         unsigned long waitStart = millis();
         while (stream->available() == 0) {
             if (millis() - waitStart > 5000) {
-                Serial.println("[OTA] ❌ Timeout aguardando dados do stream.");
+                Serial.println("[ota] ERROR: Timeout aguardando dados do stream.");
                 Update.abort();
                 http.end();
                 return false;
@@ -271,7 +271,7 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
         size_t bytesWritten = Update.write(buffer, bytesRead);
 
         if (bytesWritten != bytesRead) {
-            Serial.printf("[OTA] ❌ Erro de escrita: leu %u, escreveu %u bytes.\n",
+            Serial.printf("[ota] ERROR de escrita: leu %u, escreveu %u bytes.\n",
                           bytesRead, bytesWritten);
             Update.abort();
             http.end();
@@ -284,23 +284,23 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     http.end();
 
     if (!Update.end(true)) {
-        Serial.print("[OTA] ❌ Falha na finalização: ");
+        Serial.print("[ota] ERROR na finalizacao: ");
         Update.printError(Serial);
         return false;
     }
 
     if (!Update.isFinished()) {
-        Serial.println("[OTA] ❌ Update não foi concluído corretamente.");
+        Serial.println("[ota] ERROR: Update nao foi concluido corretamente.");
         return false;
     }
 
-    Serial.println("\n[OTA] ✅ Firmware gravado com sucesso!");
-    Serial.printf("[OTA] %u bytes escritos de %d\n", written, contentLength);
+    Serial.println("\n[ota] Firmware gravado com sucesso");
+    Serial.printf("[ota] %u bytes escritos de %d\n", written, contentLength);
 
     _status = SUCCESS;
     _reportResult(true);
 
-    Serial.println("[OTA] Reiniciando em 3 segundos...");
+    Serial.println("[ota] Reiniciando em 3 segundos...");
     delay(3000);
     ESP.restart();
 
@@ -318,9 +318,9 @@ void OTAHandler::_onProgress(size_t progress, size_t total) {
     _instance->_progress = percent;
 
     if (percent % 10 == 0) {
-        Serial.printf("[OTA] Progresso: [");
+        Serial.printf("[ota] Progresso: [");
         for (int i = 0; i < 10; i++) {
-            Serial.print(i < (percent / 10) ? "█" : "░");
+            Serial.print(i < (percent / 10) ? "#" : "-");
         }
         Serial.printf("] %d%% (%u/%u bytes)\n", percent, progress, total);
     }
@@ -341,13 +341,13 @@ void OTAHandler::_reportResult(bool success) {
         Firebase.setInt(_firebase->fbdo, basePath + "lastUpdateTimestamp",
                         (int)_firebase->getCurrentTimestamp());
 
-        Serial.println("[OTA] ✅ Resultado reportado ao Firebase: SUCESSO");
+        Serial.println("[ota] Resultado reportado ao Firebase: SUCESSO");
     } else {
         Firebase.setString(_firebase->fbdo, basePath + "lastError",
                            "Falha no download/instalação - " + _pendingVersion);
         Firebase.setInt(_firebase->fbdo, basePath + "lastErrorTimestamp",
                         (int)_firebase->getCurrentTimestamp());
 
-        Serial.println("[OTA] ⚠️ Resultado reportado ao Firebase: FALHA");
+        Serial.println("[ota] Resultado reportado ao Firebase: FALHA");
     }
 }

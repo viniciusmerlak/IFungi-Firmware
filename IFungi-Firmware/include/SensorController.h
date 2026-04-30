@@ -17,6 +17,11 @@ public:
     int getCO();
     int getLight();
     int getTVOCs();
+    bool isDHTHealthy() const { return dhtOK; }
+    bool isCCS811Healthy() const { return ccsOK; }
+    bool isMQ7Healthy() const { return millis() >= mq7WarmupUntil; }
+    bool isLDRHealthy() const { return true; }
+    bool isWaterLevelHealthy() const { return true; }
     
 private:
     static const uint8_t MQ7_PIN = 35;
