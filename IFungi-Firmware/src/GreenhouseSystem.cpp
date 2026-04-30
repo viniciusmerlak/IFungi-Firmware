@@ -23,7 +23,7 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     _email     = email;
     _password  = password;
 
-    Serial.println("Authenticating with Firebase...");
+    Serial.println("[firebase] Autenticando com Firebase...");
 
     Firebase.reset(&config);
     Firebase.reconnectNetwork(true);
@@ -32,25 +32,24 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     auth.user.email       = _email.c_str();
     auth.user.password    = _password.c_str();
     config.database_url   = _dbUrl.c_str();
-    config.token_status_callback = tokenStatusCallback;
     
     Firebase.begin(&config, &auth);
     
-    Serial.print("Waiting for authentication");
+    // Aguarda autenticação com timeout de 30 segundos
+    Serial.print("[firebase] Aguardando autenticação");
     unsigned long startTime = millis();
+    const unsigned long TIMEOUT = 30000;
     
-    while (millis() - startTime < 20000) {
+    while (millis() - startTime < TIMEOUT) {
         if (Firebase.ready()) {
             authenticated = true;
             userUID = String(auth.token.uid.c_str());
             greenhouseId = "IFUNGI-" + getMacAddress();
             
-            Serial.println("\nAuthentication successful!");
-            Serial.print("UID: "); Serial.println(userUID);
+            Serial.println("\n[firebase] Autenticação bem-sucedida!");
+            Serial.print("[firebase] UID: "); Serial.println(userUID);
             
             verifyGreenhouse();
-            // CORREÇÃO: checkUserPermission agora suporta múltiplas estufas por usuário.
-            // A função migra automaticamente o formato antigo (string) para array JSON.
             checkUserPermission(userUID, greenhouseId);
             return true;
         }
@@ -58,7 +57,7 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
         Serial.print(".");
     }
     
-    Serial.println("\nAuthentication failed: Timeout");
+    Serial.println("\n[firebase] ERRO - Autenticação expirada (timeout)");
     return false;
 }
 

@@ -36,15 +36,6 @@
     #error "IFUNGI_OTA_PASSWORD nao definida. Verifique seu arquivo .env"
 #endif
 
-// IP estático padrão (ajuste para sua rede se necessário)
-static const IPAddress STATIC_IP(192, 168, 1, 77);
-static const IPAddress STATIC_GW(192, 168, 1, 1);
-static const IPAddress STATIC_MASK(255, 255, 255, 0);
-static const IPAddress STATIC_DNS1(8, 8, 8, 8);
-static const IPAddress STATIC_DNS2(8, 8, 4, 4);
-
-
-
 // =============================================================================
 // VARIÁVEIS GLOBAIS DO SISTEMA
 // =============================================================================
@@ -72,6 +63,15 @@ const String FIRMWARE_VERSION = "1.0.0";       // ← OTA: versão atual
 
 /// @brief ID único da estufa baseado no MAC address
 String greenhouseID;
+
+/// @brief Flag para indicar se rede cativa está ativa
+volatile bool wifiConfigPortalActive = false;
+
+/// @brief Timestamp da última tentativa de reconexão WiFi
+unsigned long lastWiFiReconnectAttempt = 0;
+
+/// @brief Intervalo para tentar reconectar WiFi (30 segundos)
+const unsigned long WIFI_RECONNECT_INTERVAL = 30000;
 
 // =============================================================================
 // VARIÁVEIS DE TEMPORIZAÇÃO
@@ -335,6 +335,51 @@ void handleDebugAndCalibration() {
 }
 
 // =============================================================================
+// RECONEXÃO WIFI E FIREBASE PERIÓDICA
+// =============================================================================
+
+/**
+ * @brief Tenta reconectar WiFi e Firebase periodicamente quando em modo life support
+ *
+ * @details Se o sistema estiver em modo suporte de vida (rede cativa ou desconectado),
+ * tenta reconectar automaticamente a cada 30 segundos.
+ */
+void handleWiFiReconnection() {
+    // Se já está conectado e autenticado, não faz nada
+    if (WiFi.status() == WL_CONNECTED && firebase.isAuthenticated()) {
+        return;
+    }
+    
+    // Se estiver no portal de configuração, não tenta reconectar automaticamente
+    if (wifiConfigPortalActive) {
+        return;
+    }
+    
+    // Tenta reconectar a cada 30 segundos
+    if (millis() - lastWiFiReconnectAttempt > WIFI_RECONNECT_INTERVAL) {
+        lastWiFiReconnectAttempt = millis();
+        
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[wifi] Tentando reconectar WiFi...");
+            WiFi.reconnect();
+        } else if (!firebase.isAuthenticated()) {
+            Serial.println("[firebase] Tentando reconectar Firebase...");
+            
+            String email, password;
+            if (firebase.loadFirebaseCredentials(email, password)) {
+                if (firebase.authenticate(email, password)) {
+                    Serial.println("[firebase] Reconectado com sucesso!");
+                    firebase.sendHeartbeat();
+                    
+                    // Se reconectou, pode desligar life support
+                    lifeSupportTaskRunning = false;
+                }
+            }
+        }
+    }
+}
+
+// =============================================================================
 // TAREFA DO LED INDICADOR
 // =============================================================================
 
@@ -481,236 +526,116 @@ void setupSensorsAndActuators() {
 // =============================================================================
 
 /**
- * @brief Configura conexão WiFi e autenticação Firebase
+ * @brief Configura conexão WiFi e autenticação Firebase com rede cativa como fallback
  * 
  * @details Gerencia todo o processo de conexão de rede e autenticação:
- * - Configura WiFiManager com portal de configuração
- * - Tenta conexão automática com fallback para modo AP
- * - Processa credenciais Firebase (novas ou salvas)
- * - Realiza autenticação com tentativas e fallback offline
- * - Verifica qualidade do sinal WiFi
- * - Envia heartbeat inicial
+ * - Tenta conexão automática com WiFi salvo
+ * - Se falhar, ativa rede cativa (AP) sem desligar life support
+ * - Carrega credenciais Firebase do NVS
+ * - Se não existem, ativa rede cativa para configurar
+ * - Autentica no Firebase com 2 tentativas
+ * - Se falhar, ativa rede cativa para reconfigurar
+ * - Life support continua rodando durante toda a configuração
  * 
- * @note Inclui mecanismos de retry e recuperação de falhas
+ * @note Sistema nunca reinicia por falha de WiFi/Firebase — sempre ativa rede cativa
  * 
- * @warning Em caso de falha crítica na autenticação, o sistema opera em modo offline
+ * @warning Em modo life support, apenas sensores e atuadores operam (sem Firebase)
  * 
  * @see WiFiManager
  * @see FirebaseHandler::authenticate()
- * @see FirebaseHandler::verifyGreenhouse()
- * @see FirebaseHandler::sendLocalData()
- * @see FirebaseHandler::sendHeartbeat()
+ * @see FirebaseHandler::loadFirebaseCredentials()
  */
 void setupWiFiAndFirebase() {
-    Serial.println("[wifi] Iniciando configuracao de rede...");
+    Serial.println("[wifi] Iniciando conexao...");
     
-    // Configuração do WiFiManager
-    wifiManager.setConfigPortalTimeout(180); // 3 minutos para configurar
-    wifiManager.setConnectTimeout(30); // 30 segundos para conectar
-    wifiManager.setDebugOutput(true);
-    wifiManager.setSTAStaticIPConfig(STATIC_IP, STATIC_GW, STATIC_MASK, STATIC_DNS1);
-    Serial.println("[wifi] WiFi STA configurado para IP estatico");
-    wifiManager.setSaveConfigCallback([]() {
-        Serial.println("[wifi] Configuracao salva via portal web");
-    });
-
-    // Parâmetros customizados para credenciais Firebase
-    // Campos vazios — o usuário preenche no portal da rede cativa
-    // Credenciais de runtime NUNCA devem ser hardcoded no firmware
-    WiFiManagerParameter custom_email("email", "Email Firebase", "", 40);
-    WiFiManagerParameter custom_password("password", "Senha Firebase", "", 40, "type=\"password\"");
+    WiFiManager wm;
+    wm.setConfigPortalTimeout(180);
+    wm.setConnectTimeout(30);
+    wm.setDebugOutput(true);
     
-    wifiManager.addParameter(&custom_email);
-    wifiManager.addParameter(&custom_password);
-
-    // Tentativa de conexão automática ou inicia portal de configuração
-    Serial.println("[wifi] Tentando conectar ao WiFi...");
-    
-    bool wifiConnected = false;
-    int wifiAttempts = 0;
-    const int MAX_WIFI_ATTEMPTS = 2;
-    bool staticIpEnabled = true;
-
-    // Loop de tentativas de conexão WiFi
-    while (!wifiConnected && wifiAttempts < MAX_WIFI_ATTEMPTS) {
-        // AP name e senha do portal vêm do .env via IFUNGI_WIFI_AP_NAME / IFUNGI_WIFI_AP_PASSWORD
-        if (wifiManager.autoConnect(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD)) {
-            wifiConnected = true;
-            Serial.println("[wifi] WiFi conectado");
-            Serial.println("[wifi] IP: " + WiFi.localIP().toString());
-            if (staticIpEnabled) {
-                Serial.println("[wifi] Modo IP estatico ativo");
-            } else {
-                Serial.println("[wifi] Modo DHCP ativo (fallback)");
-            }
-            break;
-        } else {
-            wifiAttempts++;
-            Serial.printf("[wifi] Falha na conexao WiFi (tentativa %d/%d)\n", wifiAttempts, MAX_WIFI_ATTEMPTS);
-            
-            if (wifiAttempts < MAX_WIFI_ATTEMPTS) {
-                if (staticIpEnabled) {
-                    // Fallback seguro: se IP estático falhar, segunda tentativa via DHCP.
-                    staticIpEnabled = false;
-                    wifiManager.setSTAStaticIPConfig(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
-                    Serial.println("[wifi] Fallback para DHCP na proxima tentativa");
-                }
-                Serial.println("[wifi] Tentando novamente em 5 segundos...");
-                delay(5000);
-                
-                // Reset WiFi entre tentativas
-                WiFi.disconnect(true);
-                delay(1000);
-                WiFi.mode(WIFI_STA);
-                delay(1000);
-            }
-        }
-    }
-
-    // Fallback se todas as tentativas falharem
-    if (!wifiConnected) {
-        Serial.println("[wifi] Todas as tentativas de conexao WiFi falharam");
-        Serial.println("[wifi] Reiniciando em 5 segundos...");
-        delay(5000);
-        ESP.restart();
-        return;
-    }
-
-    // Verificação da qualidade do sinal WiFi
-    if (WiFi.RSSI() < -80) {
-        Serial.println("[wifi] Sinal WiFi fraco (RSSI: " + String(WiFi.RSSI()) + " dBm)");
-    } else {
-        Serial.println("[wifi] Sinal WiFi OK (RSSI: " + String(WiFi.RSSI()) + " dBm)");
-    }
-
-    // Processamento das credenciais do Firebase
-    bool firebaseConfigured = false;
-    bool usingNewCredentials = false;
-    String email, firebasePassword;
-
-    // Verifica se novas credenciais foram fornecidas via portal
-    if (strlen(custom_email.getValue()) > 0 && strlen(custom_password.getValue()) > 0) {
-        Serial.println("[firebase] Novas credenciais fornecidas via portal");
-        email = String(custom_email.getValue());
-        firebasePassword = String(custom_password.getValue());
-        usingNewCredentials = true;
+    // Tenta conexão automática com WiFi salvo
+    if (!wm.autoConnect(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD)) {
+        Serial.println("[wifi] Falha na conexao - ativando rede cativa para reconfiguracao");
+        wifiConfigPortalActive = true;
+        lifeSupportTaskRunning = true;
+        wm.startConfigPortal(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD);
+        wifiConfigPortalActive = false;
         
-        // Salva as novas credenciais no NVS
-        Preferences preferences;
-        if (preferences.begin("firebase-creds", false)) {
-            preferences.putString("email", email);
-            preferences.putString("password", firebasePassword);
-            preferences.end();
-            Serial.println("[firebase] Novas credenciais salvas no NVS");
+        // Se saiu do portal sem conectar, continua em life support
+        if (WiFi.status() != WL_CONNECTED) {
+            Serial.println("[wifi] Continuando em modo suporte de vida");
+            return;
         }
-    } 
-    // Tenta carregar credenciais salvas no NVS
-    else if (firebase.loadFirebaseCredentials(email, firebasePassword)) {
-        Serial.println("[firebase] Usando credenciais salvas no NVS");
-        usingNewCredentials = false;
-    } 
-    // Nenhuma credencial disponível
-    else {
-        Serial.println("[firebase] Nenhuma credencial disponivel");
-        Serial.println("[wifi] Por favor, acesse o portal web para configurar:");
-        Serial.println("   http://" + WiFi.localIP().toString());
-        Serial.println("   Ou reinicie e conecte ao AP 'IFungi-Config'");
+    }
+    
+    Serial.println("[wifi] WiFi conectado: " + WiFi.localIP().toString());
+    delay(2000);
+    
+    // Carrega credenciais Firebase do NVS
+    String email, password;
+    if (!firebase.loadFirebaseCredentials(email, password)) {
+        Serial.println("[firebase] Credenciais nao encontradas - rede cativa ativada");
+        wifiConfigPortalActive = true;
+        lifeSupportTaskRunning = true;
+        wm.startConfigPortal(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD);
+        wifiConfigPortalActive = false;
         return;
     }
-
-    // Processo de autenticação no Firebase
-    Serial.println("[firebase] Iniciando autenticacao...");
     
+    // Tenta autenticar no Firebase (máximo 2 tentativas)
+    Serial.println("[firebase] Iniciando autenticacao...");
     bool firebaseAuthenticated = false;
-    int firebaseAttempts = 0;
-    const int MAX_FIREBASE_ATTEMPTS = 3;
-
-    // Loop de tentativas de autenticação Firebase
-    while (!firebaseAuthenticated && firebaseAttempts < MAX_FIREBASE_ATTEMPTS) {
-        firebaseAttempts++;
-        Serial.printf("[firebase] Tentativa %d/%d de autenticacao...\n", 
-                     firebaseAttempts, MAX_FIREBASE_ATTEMPTS);
-
-        // Credenciais Firebase injetadas em build-time pelo .env
-        // Em runtime, podem ser sobrescritas pelo portal WiFiManager ou NVS
-        if (firebase.authenticate(email, firebasePassword)) {
+    
+    for (int i = 1; i <= 2; i++) {
+        Serial.printf("[firebase] Tentativa %d/2\n", i);
+        
+        if (firebase.authenticate(email, password)) {
             firebaseAuthenticated = true;
-            Serial.println("[firebase] Autenticacao bem-sucedida");
+            Serial.println("[firebase] Autenticacao bem-sucedida!");
             
-            // verifyGreenhouse() já é chamado internamente por authenticate().
-            // Garante que o nó OTA existe (sem Firebase Storage)
+            // Garante estrutura do banco
             firebase.ensureOTANodeExists();
-            // Garante que led_schedule e operation_mode existem (gerados pelo ESP32)
             firebase.ensureLEDScheduleExists(actuators);
             firebase.ensureOperationModeExists(actuators);
             
             // Envia dados locais pendentes
             firebase.sendLocalData();
+            firebase.sendHeartbeat();
             break;
         } else {
-            Serial.printf("[firebase] Falha na autenticacao (tentativa %d/%d)\n", 
-                         firebaseAttempts, MAX_FIREBASE_ATTEMPTS);
+            Serial.printf("[firebase] Falha na autenticacao (tentativa %d/2)\n", i);
             
-            // Análise de possíveis causas no primeiro erro
-            if (firebaseAttempts == 1) {
+            if (i == 1) {
                 Serial.println("[firebase] Possiveis causas:");
-                Serial.println("   - Credenciais inválidas/expiradas");
-                Serial.println("   - Problema de conexão com a internet");
-                Serial.println("   - Servidor Firebase indisponível");
+                Serial.println("   - Credenciais invalidas");
+                Serial.println("   - Problema de conexao com internet");
+                Serial.println("   - Problema de DNS");
             }
             
-            if (firebaseAttempts < MAX_FIREBASE_ATTEMPTS) {
-                Serial.println("[firebase] Nova tentativa em 3 segundos...");
-                delay(3000);
-            }
+            if (i < 2) delay(3000);
         }
     }
-
-    // Fallback para modo offline se autenticação falhar
+    
+    // Se falha autenticação, ativa rede cativa para reconfigurar credenciais
     if (!firebaseAuthenticated) {
-        Serial.println("[firebase] Falha critica: nao foi possivel autenticar");
+        Serial.println("[firebase] Falha critica - rede cativa ativada para reconfiguracao");
         
         // Remove credenciais inválidas do NVS
-        if (usingNewCredentials) {
-            Serial.println("[firebase] Removendo credenciais invalidas do NVS...");
-            Preferences preferences;
-            if (preferences.begin("firebase-creds", false)) {
-                preferences.clear();
-                preferences.end();
-                Serial.println("[firebase] Credenciais invalidas removidas");
-            }
+        Preferences preferences;
+        if (preferences.begin("firebase-creds", false)) {
+            preferences.clear();
+            preferences.end();
+            Serial.println("[firebase] Credenciais invalidas removidas");
         }
         
-        Serial.println("[wifi] Por favor, reconfigure as credenciais via portal web:");
-        Serial.println("   http://" + WiFi.localIP().toString());
-        Serial.println("[system] O sistema funcionara em modo offline ate a configuracao");
-        
-        // Não reinicia - permite operação offline
+        wifiConfigPortalActive = true;
+        lifeSupportTaskRunning = true;
+        wm.startConfigPortal(IFUNGI_WIFI_AP_NAME, IFUNGI_WIFI_AP_PASSWORD);
+        wifiConfigPortalActive = false;
         return;
     }
-
-    // Verificação final do estado do sistema
-    Serial.println("[system] Verificando estado final do sistema...");
     
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.println("[system] WiFi: CONECTADO");
-    } else {
-        Serial.println("[system] WiFi: DESCONECTADO");
-    }
-    
-    if (firebase.isAuthenticated()) {
-        Serial.println("[system] Firebase: AUTENTICADO");
-    } else {
-        Serial.println("[system] Firebase: NAO AUTENTICADO");
-    }
-
-    Serial.println("[system] Configuracao de rede e Firebase concluida");
-    
-    // Envia heartbeat inicial
-    if (firebase.isAuthenticated()) {
-        firebase.sendHeartbeat();
-        Serial.println("[system] Heartbeat inicial enviado");
-    }
+    Serial.println("[system] WiFi e Firebase configurados com sucesso");
 }
 
 // =============================================================================
@@ -1021,17 +946,15 @@ void handleRepairAndOTA() {
  * @see QRCodeGenerator::generateQRCode()
  */
 void setup() {
-    // Inicialização da comunicação serial
     Serial.begin(115200);
     delay(1000);
     
     Serial.println("\n\n[system] Iniciando Sistema IFungi Greenhouse...");
     
-    // Inicialização das tarefas e componentes
     setupLEDTask();
     setupSensorsAndActuators();
 
-    // Inicia contingência de suporte de vida antes da etapa potencialmente bloqueante de rede cativa
+    // Inicia tarefa de suporte de vida - SEMPRE ativa
     lifeSupportTaskRunning = true;
     xTaskCreatePinnedToCore(
         lifeSupportTask,
@@ -1043,20 +966,19 @@ void setup() {
         1
     );
 
+    // Tenta configurar WiFi e Firebase
     setupWiFiAndFirebase();
-    // Após setup de rede/Firebase, o loop principal assume o controle normal
-    lifeSupportTaskRunning = false;
-    if (lifeSupportTaskHandle != NULL) {
-        vTaskDelete(lifeSupportTaskHandle);
-        lifeSupportTaskHandle = NULL;
+    
+    // Se conseguiu autenticar, desliga life support (loop principal assume controle)
+    if (firebase.isAuthenticated()) {
+        lifeSupportTaskRunning = false;
     }
+    // Se não, lifeSupportTaskRunning permanece TRUE e continua rodando
 
-    // Geração do ID único da estufa
     greenhouseID = "IFUNGI-" + getMacAddress();
     Serial.println("[system] ID da Estufa: " + greenhouseID);
     qrGenerator.generateQRCode(greenhouseID);
 
-    // ← OTA: inicializa o handler após WiFi/Firebase estarem prontos
     otaHandler.begin(&firebase, greenhouseID, FIRMWARE_VERSION, 60000);
 
     Serial.println("[system] Sistema inicializado e pronto para operação");
@@ -1092,6 +1014,7 @@ void loop() {
     handleOperationMode();          // ← verifica modo de operação a cada 5s
     otaHandler.handle();            // ← OTA: verifica atualizações a cada 60s
     handleRepairAndOTA();           // ← verifica integridade do banco a cada 5min
+    handleWiFiReconnection();       // ← tenta reconectar periodicamente
     
     // Pequeno delay para estabilidade do sistema
     delay(10);
