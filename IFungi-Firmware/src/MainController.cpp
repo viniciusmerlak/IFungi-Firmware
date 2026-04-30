@@ -36,6 +36,13 @@
     #error "IFUNGI_OTA_PASSWORD nao definida. Verifique seu arquivo .env"
 #endif
 
+// IP estático padrão (ajuste para sua rede se necessário)
+static const IPAddress STATIC_IP(192, 168, 1, 77);
+static const IPAddress STATIC_GW(192, 168, 1, 1);
+static const IPAddress STATIC_MASK(255, 255, 255, 0);
+static const IPAddress STATIC_DNS1(8, 8, 8, 8);
+static const IPAddress STATIC_DNS2(8, 8, 4, 4);
+
 
 
 // =============================================================================
@@ -148,6 +155,10 @@ const unsigned long LOCAL_SAVE_INTERVAL = 60000;
 
 /// @brief Handle da tarefa FreeRTOS para controle do LED
 TaskHandle_t ledTaskHandle = NULL;
+/// @brief Handle da tarefa FreeRTOS de suporte de vida durante rede cativa
+TaskHandle_t lifeSupportTaskHandle = NULL;
+/// @brief Flag de execução da task de suporte de vida
+volatile bool lifeSupportTaskRunning = false;
 
 /// @brief Estado anterior do modo debug para detecção de mudanças
 bool lastDebugMode = false;
@@ -160,6 +171,51 @@ unsigned long lastDebugCheck = 0;
  * @brief Intervalo para verificação do modo debug (2 segundos)
  */
 const unsigned long DEBUG_CHECK_INTERVAL = 2000;
+
+// =============================================================================
+// TAREFA DE SUPORTE DE VIDA (DURANTE PORTAL CAPTIVO)
+// =============================================================================
+
+/**
+ * @brief Mantém controle básico da estufa durante configuração de rede cativa
+ *
+ * @details Executa leitura de sensores e controle automático de atuadores em
+ * paralelo ao WiFiManager quando ele estiver bloqueado no setup.
+ * Não depende de Firebase e prioriza continuidade do ambiente interno.
+ */
+void lifeSupportTask(void * parameter) {
+    unsigned long lastSensorTs = 0;
+    unsigned long lastActTs = 0;
+
+    for (;;) {
+        if (!lifeSupportTaskRunning) {
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        unsigned long now = millis();
+
+        if (now - lastSensorTs > SENSOR_READ_INTERVAL) {
+            sensors.update();
+            lastSensorTs = now;
+        }
+
+        if (now - lastActTs > ACTUATOR_CONTROL_INTERVAL) {
+            actuators.controlAutomatically(
+                sensors.getTemperature(),
+                sensors.getHumidity(),
+                sensors.getLight(),
+                sensors.getCO(),
+                sensors.getCO2(),
+                sensors.getTVOCs(),
+                sensors.getWaterLevel()
+            );
+            lastActTs = now;
+        }
+
+        vTaskDelay(50 / portTICK_PERIOD_MS);
+    }
+}
 
 // =============================================================================
 // FUNÇÕES DE CONTROLE DO MODO DEBUG E CALIBRAÇÃO
@@ -234,6 +290,19 @@ void handleDebugAndCalibration() {
             int ledsIntensity;
             firebase.getManualActuatorStates(relay1, relay2, relay3, relay4, 
                                            ledsOn, ledsIntensity, humidifierOn);
+
+            // Proteção de combinação inválida para Peltier:
+            // R2 não pode ficar ON se R1 estiver OFF (R1 OFF + R2 ON não deve ser aceito).
+            // Observação: R1 ON + R2 OFF é válido (resfriamento), conforme sua regra.
+            if (!relay1 && relay2) {
+                relay2 = false;
+                String fixPath = "/greenhouses/" + firebase.greenhouseId + "/manual_actuators/rele2";
+                if (Firebase.setBool(firebase.fbdo, fixPath.c_str(), false)) {
+                    Serial.println("🛡️ [MANUAL] Correção aplicada: rele2->false (rele1 estava false)");
+                } else {
+                    Serial.println("⚠️ [MANUAL] Falha ao corrigir rele2 inválido no Firebase");
+                }
+            }
             
             // Verifica se houve mudanças reais nos valores
             bool hasChanges = (relay1 != lastRelay1) || (relay2 != lastRelay2) || 
@@ -437,6 +506,8 @@ void setupWiFiAndFirebase() {
     wifiManager.setConfigPortalTimeout(180); // 3 minutos para configurar
     wifiManager.setConnectTimeout(30); // 30 segundos para conectar
     wifiManager.setDebugOutput(true);
+    wifiManager.setSTAStaticIPConfig(STATIC_IP, STATIC_GW, STATIC_MASK, STATIC_DNS1);
+    Serial.println("🌐 WiFi STA configurado para IP estático");
     wifiManager.setSaveConfigCallback([]() {
         Serial.println("✅ Configuração salva via portal web");
     });
@@ -456,6 +527,7 @@ void setupWiFiAndFirebase() {
     bool wifiConnected = false;
     int wifiAttempts = 0;
     const int MAX_WIFI_ATTEMPTS = 2;
+    bool staticIpEnabled = true;
 
     // Loop de tentativas de conexão WiFi
     while (!wifiConnected && wifiAttempts < MAX_WIFI_ATTEMPTS) {
@@ -464,19 +536,23 @@ void setupWiFiAndFirebase() {
             wifiConnected = true;
             Serial.println("✅ WiFi conectado!");
             Serial.println("📡 IP: " + WiFi.localIP().toString());
-
-            // Força DNS confiável do Google — evita falha de resolução
-            // de www.googleapis.com que impede autenticação Firebase
-            WiFi.config(WiFi.localIP(), WiFi.gatewayIP(), WiFi.subnetMask(),
-                        IPAddress(8, 8, 8, 8), IPAddress(8, 8, 4, 4));
-            Serial.println("🌐 DNS: 8.8.8.8 / 8.8.4.4 configurado");
-            delay(200); // aguarda stack de rede aplicar o novo DNS
+            if (staticIpEnabled) {
+                Serial.println("🌐 Modo IP estático ativo");
+            } else {
+                Serial.println("🌐 Modo DHCP ativo (fallback)");
+            }
             break;
         } else {
             wifiAttempts++;
             Serial.printf("❌ Falha na conexão WiFi (tentativa %d/%d)\n", wifiAttempts, MAX_WIFI_ATTEMPTS);
             
             if (wifiAttempts < MAX_WIFI_ATTEMPTS) {
+                if (staticIpEnabled) {
+                    // Fallback seguro: se IP estático falhar, segunda tentativa via DHCP.
+                    staticIpEnabled = false;
+                    wifiManager.setSTAStaticIPConfig(IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0), IPAddress(0, 0, 0, 0));
+                    Serial.println("🔄 Fallback para DHCP na próxima tentativa");
+                }
                 Serial.println("🔄 Tentando novamente em 5 segundos...");
                 delay(5000);
                 
@@ -945,7 +1021,26 @@ void setup() {
     // Inicialização das tarefas e componentes
     setupLEDTask();
     setupSensorsAndActuators();
+
+    // Inicia contingência de suporte de vida antes da etapa potencialmente bloqueante de rede cativa
+    lifeSupportTaskRunning = true;
+    xTaskCreatePinnedToCore(
+        lifeSupportTask,
+        "LifeSupport_Task",
+        4096,
+        NULL,
+        1,
+        &lifeSupportTaskHandle,
+        1
+    );
+
     setupWiFiAndFirebase();
+    // Após setup de rede/Firebase, o loop principal assume o controle normal
+    lifeSupportTaskRunning = false;
+    if (lifeSupportTaskHandle != NULL) {
+        vTaskDelete(lifeSupportTaskHandle);
+        lifeSupportTaskHandle = NULL;
+    }
 
     // Geração do ID único da estufa
     greenhouseID = "IFUNGI-" + getMacAddress();

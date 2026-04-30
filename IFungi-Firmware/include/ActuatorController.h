@@ -133,6 +133,7 @@ private:
     // Variáveis de estado atual
     PeltierMode currentPeltierMode = OFF;   ///< Modo atual do Peltier
     int currentLEDIntensity = 0;            ///< Intensidade atual dos LEDs (0-255)
+    volatile int targetLEDIntensity = 0;    ///< Alvo lógico de intensidade (consumido pela task)
     bool relay1State = false;               ///< Relé 1: alimentação da Peltier (on/off)
     bool relay2State = false;               ///< Relé 2: polaridade (com R1 ligado: frio/calor)
     bool relay3State = false;               ///< Estado do relé 3 (Umidificador)
@@ -160,11 +161,13 @@ private:
     int devModePin = -1;
     int devModePWMValue = 0;
     bool lastDevModeState = false;
+    TaskHandle_t ledPwmTaskHandle = nullptr;
 
     // Métodos privados
     void updateFirebaseState();
     void updateFirebaseStateImmediately();
     void executeDevModeOperations();
+    static void ledPwmTask(void* parameter);
     /// Converte intensidade lógica (0=apagado, 255=máximo) em PWM no hardware (driver invertido).
     static int ledLogicalToHardwarePwm(int logical);
     void writeLedHardwareFromLogical(int logical);

@@ -17,6 +17,30 @@ void ActuatorController::writeLedHardwareFromLogical(int logical) {
     analogWrite(_pinLED, ledLogicalToHardwarePwm(logical));
 }
 
+void ActuatorController::ledPwmTask(void* parameter) {
+    ActuatorController* self = static_cast<ActuatorController*>(parameter);
+    const int step = 5;
+
+    for (;;) {
+        int current = self->currentLEDIntensity;
+        int target  = self->targetLEDIntensity;
+
+        if (target > current) {
+            current += step;
+            if (current > target) current = target;
+            self->writeLedHardwareFromLogical(current);
+            self->currentLEDIntensity = current;
+        } else if (target < current) {
+            current -= step;
+            if (current < target) current = target;
+            self->writeLedHardwareFromLogical(current);
+            self->currentLEDIntensity = current;
+        }
+
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+    }
+}
+
 // =============================================================================
 // MÉTODOS DE CONTROLE DE ESCRITA NO FIREBASE
 // =============================================================================
@@ -139,11 +163,23 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRel
     peltierActive       = false;
     lastPeltierTime     = 0;
     peltierHeatingStart = 0;
+    currentLEDIntensity = 0;
+    targetLEDIntensity  = 0;
     lastUpdateTime      = 0;
     inCooldown          = false;
     cooldownStart       = 0;
     blockFirebaseWrite  = false;
     firebaseWriteBlockTime = 0;
+
+    xTaskCreatePinnedToCore(
+        ledPwmTask,
+        "LED_PWM_Task",
+        2048,
+        this,
+        1,
+        &ledPwmTaskHandle,
+        1
+    );
     
     Serial.println("✅ ActuatorController initialized successfully");
 }
@@ -441,31 +477,21 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
  * Total de fade (51 steps × 3ms) ≈ 153ms — aceitável para transições visuais.
  */
 void ActuatorController::controlLEDs(bool on, int intensity) {
+    if (intensity < 0) intensity = 0;
+    if (intensity > 255) intensity = 255;
+
     bool stateChanged  = false;
-    int  oldIntensity  = currentLEDIntensity;
-    
-    if (on) {
-        for (int i = currentLEDIntensity; i <= intensity; i += 5) {
-            writeLedHardwareFromLogical(i);
-            delayMicroseconds(3000);
+    int oldTarget = targetLEDIntensity;
+    int newTarget = on ? intensity : 0;
+
+    if (newTarget != oldTarget) {
+        targetLEDIntensity = newTarget;
+        stateChanged = true;
+        if (newTarget > 0) {
+            Serial.printf("💡 [ATUADOR] LEDs LIGADO (task), alvo: %d/255\n", newTarget);
+        } else {
+            Serial.println("💡 [ATUADOR] LEDs DESLIGADO (task)");
         }
-        writeLedHardwareFromLogical(intensity);
-        currentLEDIntensity = intensity;
-        if (oldIntensity != intensity) {
-            stateChanged = true;
-            Serial.printf("💡 [ATUADOR] LEDs LIGADO, intensidade: %d/255\n", intensity);
-        }
-    } else {
-        for (int i = currentLEDIntensity; i >= 0; i -= 5) {
-            writeLedHardwareFromLogical(i);
-            delayMicroseconds(3000);
-        }
-        writeLedHardwareFromLogical(0);
-        if (currentLEDIntensity > 0) {
-            stateChanged = true;
-            Serial.println("💡 [ATUADOR] LEDs DESLIGADO");
-        }
-        currentLEDIntensity = 0;
     }
     
     if (stateChanged && firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && 
@@ -626,24 +652,13 @@ void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, 
         Serial.printf("🔧 [MANUAL] Relay 4: %s\n", relay4 ? "ON" : "OFF");
     }
 
-    if (ledsOn != (currentLEDIntensity > 0) || (ledsOn && ledsIntensity != currentLEDIntensity)) {
-        if (ledsOn) {
-            for (int i = currentLEDIntensity; i <= ledsIntensity; i += 5) {
-                writeLedHardwareFromLogical(i);
-                delayMicroseconds(3000);
-            }
-            writeLedHardwareFromLogical(ledsIntensity);
-            currentLEDIntensity = ledsIntensity;
-        } else {
-            for (int i = currentLEDIntensity; i >= 0; i -= 5) {
-                writeLedHardwareFromLogical(i);
-                delayMicroseconds(3000);
-            }
-            writeLedHardwareFromLogical(0);
-            currentLEDIntensity = 0;
-        }
+    int requestedIntensity = ledsOn ? ledsIntensity : 0;
+    if (requestedIntensity < 0) requestedIntensity = 0;
+    if (requestedIntensity > 255) requestedIntensity = 255;
+    if (requestedIntensity != targetLEDIntensity) {
+        controlLEDs(requestedIntensity > 0, requestedIntensity);
         anyChange = true;
-        Serial.printf("🔧 [MANUAL] LEDs: %s, Intensidade: %d/255\n", ledsOn ? "ON" : "OFF", ledsIntensity);
+        Serial.printf("🔧 [MANUAL] LEDs: %s, Alvo: %d/255\n", requestedIntensity > 0 ? "ON" : "OFF", requestedIntensity);
     }
     
     if (anyChange) {
