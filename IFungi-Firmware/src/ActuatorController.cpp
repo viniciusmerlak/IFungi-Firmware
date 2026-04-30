@@ -3,6 +3,21 @@
 #include <Preferences.h>
 
 // =============================================================================
+// LED — driver com PWM invertido (255 no pino = apagado, 0 = máximo brilho)
+// =============================================================================
+
+int ActuatorController::ledLogicalToHardwarePwm(int logical) {
+    int v = logical;
+    if (v < 0) v = 0;
+    if (v > 255) v = 255;
+    return 255 - v;
+}
+
+void ActuatorController::writeLedHardwareFromLogical(int logical) {
+    analogWrite(_pinLED, ledLogicalToHardwarePwm(logical));
+}
+
+// =============================================================================
 // MÉTODOS DE CONTROLE DE ESCRITA NO FIREBASE
 // =============================================================================
 
@@ -68,7 +83,7 @@ bool ActuatorController::loadSetpointsNVS() {
         tempMax       = preferences.getFloat("tMax", 30.0);
         humidityMin   = preferences.getFloat("uMin", 60.0);
         humidityMax   = preferences.getFloat("uMax", 80.0);
-        coSetpoint    = preferences.getInt("coSp", 400);
+        coSetpoint    = preferences.getInt("coSp", 50);
         co2Setpoint   = preferences.getInt("co2Sp", 400);
         tvocsSetpoint = preferences.getInt("tvocsSp", 100);
         
@@ -113,7 +128,8 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRel
     pinMode(_pinRelay3, OUTPUT);
     pinMode(_pinRelay4, OUTPUT);
     
-    digitalWrite(_pinLED,    LOW);
+    // LED apagado (lógico 0) = PWM físico alto no driver invertido
+    writeLedHardwareFromLogical(0);
     digitalWrite(_pinRelay1, LOW);
     digitalWrite(_pinRelay2, LOW);
     digitalWrite(_pinRelay3, LOW);
@@ -122,6 +138,7 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRel
     humidifierOn        = false;
     peltierActive       = false;
     lastPeltierTime     = 0;
+    peltierHeatingStart = 0;
     lastUpdateTime      = 0;
     inCooldown          = false;
     cooldownStart       = 0;
@@ -136,7 +153,33 @@ void ActuatorController::setFirebaseHandler(FirebaseHandler* handler) {
     Serial.println("🔥 FirebaseHandler set for ActuatorController");
 }
 
-void ActuatorController::applySetpoints(int lux, float tMin, float tMax, float uMin, float uMax, int coSp, int co2Sp, int tvocsSp) {
+// =============================================================================
+// APPLY SETPOINTS — CORRIGIDO
+// Antes: saveSetpointsNVS() era chamada SEMPRE, a cada 5s, mesmo sem mudança.
+// Depois: compara campo a campo; só grava na NVS quando algo realmente mudou.
+// =============================================================================
+
+void ActuatorController::applySetpoints(int lux, float tMin, float tMax,
+                                        float uMin, float uMax,
+                                        int coSp, int co2Sp, int tvocsSp) {
+    // Detecta se ao menos um valor realmente mudou
+    bool changed = false;
+
+    if (lux     != luxSetpoint)                   changed = true;
+    if (coSp    != coSetpoint)                    changed = true;
+    if (co2Sp   != co2Setpoint)                   changed = true;
+    if (tvocsSp != tvocsSetpoint)                 changed = true;
+    if (fabsf(tMin - tempMin)     > 0.01f)        changed = true;
+    if (fabsf(tMax - tempMax)     > 0.01f)        changed = true;
+    if (fabsf(uMin - humidityMin) > 0.01f)        changed = true;
+    if (fabsf(uMax - humidityMax) > 0.01f)        changed = true;
+
+    if (!changed) {
+        // Firebase tem os mesmos valores — nada a fazer, não grava NVS
+        return;
+    }
+
+    // Aplica os novos valores
     luxSetpoint   = lux;
     tempMin       = tMin;
     tempMax       = tMax;
@@ -145,15 +188,21 @@ void ActuatorController::applySetpoints(int lux, float tMin, float tMax, float u
     coSetpoint    = coSp;
     co2Setpoint   = co2Sp;
     tvocsSetpoint = tvocsSp;
-    
+
+    // Persiste na NVS somente quando houve mudança real
     saveSetpointsNVS();
     
-    Serial.printf("⚙️ Setpoints: Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n", 
+    Serial.printf("⚙️ Setpoints ATUALIZADOS: Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n", 
                  lux, tMin, tMax, uMin, uMax, coSp, co2Sp, tvocsSp);
 }
 
 // =============================================================================
-// MODOS DE OPERAÇÃO
+// MODOS DE OPERAÇÃO — CORRIGIDO
+// Antes: applyOperationMode() chamava applySetpoints() com valores hardcoded
+//        do preset, apagando os setpoints que o usuário configurou no app.
+// Depois: o modo controla SOMENTE as restrições de atuadores (quem pode
+//         ligar/desligar) e o scheduler de LEDs. Os setpoints numéricos
+//         (temperatura, umidade, CO2, lux) NUNCA são tocados pela troca de modo.
 // =============================================================================
 
 void ActuatorController::applyOperationMode(OperationMode mode) {
@@ -164,20 +213,18 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
 
     Serial.printf("[MODE] 🍄 Mudando para modo: %s\n", operationModeLabel(mode).c_str());
 
+    // Aplica restrições de atuadores do modo
     _humidifierAllowed = p.humidifierEnabled;
     _ledsAllowed       = p.ledsEnabled;
     _peltierAllowed    = p.peltierEnabled;
     _exhaustForced     = p.exhaustForcedOn;
 
-    if (mode != MODE_MANUAL) {
-        applySetpoints(p.luxSetpoint,
-                       p.tempMin, p.tempMax,
-                       p.humidityMin, p.humidityMax,
-                       coSetpoint,
-                       p.co2Setpoint,
-                       tvocsSetpoint);
-    }
+    // REMOVIDO: applySetpoints() com valores hardcoded do preset.
+    // O app é a única fonte de verdade para setpoints numéricos.
+    // Se o app quiser sugerir setpoints ao trocar de modo, ele mesmo deve
+    // escrever em /setpoints no Firebase — o ESP32 lerá no próximo ciclo.
 
+    // Controle de LEDs pelo modo
     if (!p.ledsEnabled) {
         ledScheduler.scheduleEnabled = false;
         ledScheduler.solarSimEnabled = false;
@@ -196,6 +243,7 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
                       p.solarSim ? "solar" : "timer fixo");
     }
 
+    // Desliga imediatamente atuadores proibidos neste modo
     if (!p.humidifierEnabled && humidifierOn) {
         controlRelay(3, false);
         humidifierOn = false;
@@ -223,16 +271,34 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
         return;
     }
     
-    // ── PELTIER ───────────────────────────────────────────────────────────────
+    // ── PELTIER (R1=alimentação, R2=polaridade; cooldown só no aquecimento R1+R2) ──
+    if (inCooldown && (millis() - cooldownStart >= cooldownTime)) {
+        inCooldown = false;
+    }
+
+    if (currentPeltierMode == HEATING && peltierActive && peltierHeatingStart > 0 &&
+        (millis() - peltierHeatingStart >= operationTime)) {
+        Serial.println("🛑 [PEL] Limite de aquecimento contínuo — desligando (cooldown)");
+        controlPeltier(false, false);
+        inCooldown    = true;
+        cooldownStart = millis();
+    }
+
     if (!_peltierAllowed) {
         if (peltierActive) controlPeltier(false, false);
     } else {
-        if (temp < (tempMin - HYSTERESIS_TEMP)) {
+        bool wantHeat = temp < (tempMin - HYSTERESIS_TEMP);
+        bool wantCool = temp > (tempMax + HYSTERESIS_TEMP);
+        if (inCooldown && wantHeat) {
+            wantHeat = false;
+        }
+
+        if (wantHeat) {
             if (!peltierActive || currentPeltierMode != HEATING) {
                 Serial.printf("🔥 [ACTUATOR] Temp abaixo (%.1f < %.1f), aquecendo\n", temp, tempMin);
                 controlPeltier(false, true);
             }
-        } else if (temp > (tempMax + HYSTERESIS_TEMP)) {
+        } else if (wantCool) {
             if (!peltierActive || currentPeltierMode != COOLING) {
                 Serial.printf("❄️ [ACTUATOR] Temp acima (%.1f > %.1f), resfriando\n", temp, tempMax);
                 controlPeltier(true, true);
@@ -283,6 +349,7 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
             controlLEDs(schedIntensity > 0, schedIntensity);
         }
     } else {
+        // LDR em ADC: pouca luz → ADC baixo → aumentar brilho (lógico 255)
         int newIntensity = (light < luxSetpoint) ? 255 : 0;
         if (newIntensity != currentLEDIntensity) {
             controlLEDs(newIntensity > 0, newIntensity);
@@ -320,6 +387,7 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
     
     if (on) {
         if (cooling) {
+            // R1 ligado + R2 desligado = resfriar (polaridade A)
             if (!relay1State || relay2State || currentPeltierMode != COOLING) {
                 digitalWrite(_pinRelay1, HIGH);
                 digitalWrite(_pinRelay2, LOW);
@@ -327,9 +395,11 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
                 relay1State = true;
                 relay2State = false;
                 stateChanged = true;
-                Serial.println("❄️ [ATUADOR] Peltier: resfriamento ATIVADO");
+                peltierHeatingStart = 0;
+                Serial.println("❄️ [ATUADOR] Peltier: resfriamento (R1 on, R2 off)");
             }
         } else {
+            // R1 ligado + R2 ligado = aquecer (polaridade B)
             if (!relay1State || !relay2State || currentPeltierMode != HEATING) {
                 digitalWrite(_pinRelay1, HIGH);
                 digitalWrite(_pinRelay2, HIGH);
@@ -337,7 +407,8 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
                 relay1State = true;
                 relay2State = true;
                 stateChanged = true;
-                Serial.println("🔥 [ATUADOR] Peltier: aquecimento ATIVADO");
+                peltierHeatingStart = millis();
+                Serial.println("🔥 [ATUADOR] Peltier: aquecimento (R1 on, R2 on)");
             }
         }
         peltierActive   = true;
@@ -350,8 +421,9 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
             currentPeltierMode = OFF;
             relay1State        = false;
             relay2State        = false;
+            peltierHeatingStart = 0;
             stateChanged       = true;
-            Serial.println("⭕ [ATUADOR] Peltier: DESLIGADO");
+            Serial.println("⭕ [ATUADOR] Peltier: DESLIGADO (R1/R2 off)");
         }
     }
     
@@ -367,9 +439,6 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
  * @details O fade usa delayMicroseconds() em vez de delay() para não
  * bloquear o loop principal por mais que alguns milissegundos por step.
  * Total de fade (51 steps × 3ms) ≈ 153ms — aceitável para transições visuais.
- *
- * IMPORTANTE: este método NÃO deve ser chamado com delay() de 10ms+ por step,
- * pois o loop principal precisa continuar processando sensores e WiFi.
  */
 void ActuatorController::controlLEDs(bool on, int intensity) {
     bool stateChanged  = false;
@@ -377,10 +446,10 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
     
     if (on) {
         for (int i = currentLEDIntensity; i <= intensity; i += 5) {
-            analogWrite(_pinLED, i);
-            delayMicroseconds(3000); // 3ms por step ≈ 153ms total — não bloqueia heap
+            writeLedHardwareFromLogical(i);
+            delayMicroseconds(3000);
         }
-        analogWrite(_pinLED, intensity);
+        writeLedHardwareFromLogical(intensity);
         currentLEDIntensity = intensity;
         if (oldIntensity != intensity) {
             stateChanged = true;
@@ -388,10 +457,10 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
         }
     } else {
         for (int i = currentLEDIntensity; i >= 0; i -= 5) {
-            analogWrite(_pinLED, i);
+            writeLedHardwareFromLogical(i);
             delayMicroseconds(3000);
         }
-        analogWrite(_pinLED, 0);
+        writeLedHardwareFromLogical(0);
         if (currentLEDIntensity > 0) {
             stateChanged = true;
             Serial.println("💡 [ATUADOR] LEDs DESLIGADO");
@@ -523,10 +592,6 @@ void ActuatorController::setDebugMode(bool debug) {
 
 /**
  * @brief Aplica estados manuais aos atuadores (apenas em modo debug)
- *
- * @details CORREÇÃO: o fade de LEDs agora usa delayMicroseconds() em vez de
- * delay(10ms), eliminando o travamento de 510ms+ que impedia a comunicação
- * Firebase e leituras de sensor durante o ajuste manual de intensidade.
  */
 void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsIntensity, bool humidifierOn) {
     if (!debugMode) return;
@@ -561,22 +626,20 @@ void ActuatorController::setManualStates(bool relay1, bool relay2, bool relay3, 
         Serial.printf("🔧 [MANUAL] Relay 4: %s\n", relay4 ? "ON" : "OFF");
     }
 
-    // CORREÇÃO: usa delayMicroseconds (3ms/step) — não bloqueia o sistema.
-    // O fade completo leva ~153ms no máximo, em vez dos ~510ms com delay(10).
     if (ledsOn != (currentLEDIntensity > 0) || (ledsOn && ledsIntensity != currentLEDIntensity)) {
         if (ledsOn) {
             for (int i = currentLEDIntensity; i <= ledsIntensity; i += 5) {
-                analogWrite(_pinLED, i);
+                writeLedHardwareFromLogical(i);
                 delayMicroseconds(3000);
             }
-            analogWrite(_pinLED, ledsIntensity);
+            writeLedHardwareFromLogical(ledsIntensity);
             currentLEDIntensity = ledsIntensity;
         } else {
             for (int i = currentLEDIntensity; i >= 0; i -= 5) {
-                analogWrite(_pinLED, i);
+                writeLedHardwareFromLogical(i);
                 delayMicroseconds(3000);
             }
-            analogWrite(_pinLED, 0);
+            writeLedHardwareFromLogical(0);
             currentLEDIntensity = 0;
         }
         anyChange = true;
@@ -606,7 +669,6 @@ void ActuatorController::executeDevModeOperations() {
         return;
     }
 
-    // Bloqueia pinos críticos do sistema
     const int criticalPins[] = {0, 1, 3, 6, 7, 8, 9, 10, 11};
     for (int cp : criticalPins) {
         if (devModePin == cp) {

@@ -15,7 +15,8 @@ class FirebaseHandler;
  * @brief Controlador principal dos atuadores do sistema (relés, LEDs, servo, Peltier)
  *
  * Esta classe gerencia todos os atuadores do sistema de estufa, incluindo:
- * - Controle de relés para Peltier (aquecimento/resfriamento)
+ * - Controle de relés para Peltier: relé 1 = ligar/desligar pastilha; relé 2 = polaridade
+ *   (aquecer/resfriar com relé 1 ligado). Relés 3 e 4 = umidificador e exaustor.
  * - Controle de LEDs com intensidade variável
  * - Controle do servo motor para exaustão
  * - Controle do umidificador
@@ -115,8 +116,9 @@ private:
     // Variáveis de estado dos atuadores
     bool humidifierOn = false;              ///< Estado do umidificador
     bool peltierActive = false;             ///< Estado do Peltier (ativo/inativo)
-    unsigned long lastPeltierTime = 0;      ///< Último tempo de ativação do Peltier
-    unsigned long cooldownStart = 0;        ///< Início do período de cooldown
+    unsigned long lastPeltierTime = 0;      ///< Reservado / logs
+    unsigned long peltierHeatingStart = 0;   ///< Início do segmento atual de aquecimento (R1+R2)
+    unsigned long cooldownStart = 0;        ///< Início do cooldown pós-aquecimento
 
     // Setpoints do sistema
     int luxSetpoint = 5000;                 ///< Setpoint de luminosidade (lux)
@@ -124,15 +126,15 @@ private:
     float tempMax = 30.0;                   ///< Temperatura máxima (°C)
     float humidityMin = 60.0;               ///< Umidade mínima (%)
     float humidityMax = 80.0;               ///< Umidade máxima (%)
-    int coSetpoint = 400;                   ///< Setpoint de CO (ppm)
+    int coSetpoint = 50;                    ///< Setpoint de CO (ppm) — exaustão se acima
     int co2Setpoint = 400;                  ///< Setpoint de CO2 (ppm)
     int tvocsSetpoint = 100;                ///< Setpoint de TVOCs (ppb)
 
     // Variáveis de estado atual
     PeltierMode currentPeltierMode = OFF;   ///< Modo atual do Peltier
     int currentLEDIntensity = 0;            ///< Intensidade atual dos LEDs (0-255)
-    bool relay1State = false;               ///< Estado do relé 1 (Peltier)
-    bool relay2State = false;               ///< Estado do relé 2 (Peltier)
+    bool relay1State = false;               ///< Relé 1: alimentação da Peltier (on/off)
+    bool relay2State = false;               ///< Relé 2: polaridade (com R1 ligado: frio/calor)
     bool relay3State = false;               ///< Estado do relé 3 (Umidificador)
     bool relay4State = false;               ///< Estado do relé 4 (Exaustor)
     unsigned long lastUpdateTime = 0;       ///< Último tempo de atualização
@@ -148,8 +150,8 @@ private:
 
     // Variáveis de segurança do Peltier
     bool inCooldown = false;                ///< Indica se está em cooldown
-    const unsigned long operationTime = 10000;  ///< Tempo máximo de operação (10s)
-    const unsigned long cooldownTime = 10000;   ///< Tempo de cooldown (10s)
+    const unsigned long operationTime = 300000;  ///< Aquecimento contínuo máx. (5 min) antes do cooldown
+    const unsigned long cooldownTime = 60000;    ///< Cooldown após aquecimento prolongado (1 min)
 
     // Variáveis para modo de desenvolvimento
     bool devModeAnalogRead = false;
@@ -163,6 +165,9 @@ private:
     void updateFirebaseState();
     void updateFirebaseStateImmediately();
     void executeDevModeOperations();
+    /// Converte intensidade lógica (0=apagado, 255=máximo) em PWM no hardware (driver invertido).
+    static int ledLogicalToHardwarePwm(int logical);
+    void writeLedHardwareFromLogical(int logical);
 };
 
 #endif

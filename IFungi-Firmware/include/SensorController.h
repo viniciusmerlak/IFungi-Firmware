@@ -13,6 +13,7 @@ public:
     float getTemperature();
     float getHumidity();
     int getCO2();
+    /// CO estimado em ppm (MQ-7; após warmup). Não altera leituras do DHT22.
     int getCO();
     int getLight();
     int getTVOCs();
@@ -30,24 +31,34 @@ private:
     bool ccsOK;
     unsigned long lastUpdate;
     
-    // CORREÇÃO: contadores e timers de recuperação automática dos sensores.
-    // Substituem o modelo de falha permanente (flag nunca resetada até reboot).
-    uint8_t       dhtFailCount    = 0;      ///< Falhas consecutivas do DHT22
-    uint8_t       ccsFailCount    = 0;      ///< Falhas consecutivas do CCS811
-    unsigned long dhtRecoveryTime = 0;      ///< Timestamp da última falha do DHT22
-    unsigned long ccsRecoveryTime = 0;      ///< Timestamp da última falha do CCS811
+    uint8_t       dhtFailCount    = 0;
+    uint8_t       ccsFailCount    = 0;
+    unsigned long dhtRecoveryTime = 0;
+    unsigned long ccsRecoveryTime = 0;
     
     float temperature;
     float humidity;
     int co2;
-    int co;
+    int co;           ///< CO em ppm (MQ-7)
     int tvocs;
     int light;
     bool waterLevel;
+
+    unsigned long mq7WarmupUntil = 0;
+
+    /// Tensão no divisor do módulo (tip. 5 V no elemento MQ-7; ajuste se sua PCB for 3,3 V).
+    static constexpr float MQ7_VC_VOLTS   = 5.0f;
+    /// Resistência de carga do módulo em kΩ (tip. 10 k na placa YK/MQ).
+    static constexpr float MQ7_RL_KOHM    = 10.0f;
+    /// R0 em kΩ no ar “limpo” — calibre com medição de referência se necessário.
+    static constexpr float MQ7_R0_KOHM    = 18.0f;
+    /// Curva tipo datasheet Hanwei / aproximação DFRobot: ppm ≈ A * (Rs/R0)^B
+    static constexpr float MQ7_CURVE_A    = 99.042f;
+    static constexpr float MQ7_CURVE_B    = -1.518f;
+
+    int mq7PpmFromAdc(int adcRaw, float tempC, float rhPct, bool compensate) const;
     
-    // 🔥 THRESHOLD CORRIGIDO baseado nas suas medições
-    // SECO: ~1985 (1.6V), MOLHADO: ~1849-1861 (1.49-1.50V)
-    const int WATER_LEVEL_THRESHOLD = 1917; // Valor médio
+    const int WATER_LEVEL_THRESHOLD = 1917;
 };
 
 #endif

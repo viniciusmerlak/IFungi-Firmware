@@ -141,8 +141,6 @@ private:
     unsigned long lastTokenRefresh = 0;
     unsigned long lastHeartbeatTime = 0;
     const unsigned long HEARTBEAT_INTERVAL = 30000;
-    unsigned long lastHistoryTime = 0;
-    const unsigned long HISTORY_INTERVAL = 300000;
 
     // Cache do modo de operação para detectar mudanças sem re-escrever sempre
     OperationMode _lastPublishedMode = MODE_MANUAL;

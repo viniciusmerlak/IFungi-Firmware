@@ -384,11 +384,9 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
     } else {
         Serial.println("[FIREBASE] ERRO - Falha ao enviar dados: " + fbdo.errorReason());
     }
-    
-    if (millis() - lastHistoryTime > HISTORY_INTERVAL) {
-        sendDataToHistory(temp, humidity, co2, co, lux, tvocs);
-        lastHistoryTime = millis();
-    }
+
+    // Histórico: único caminho em MainController::handleHistoryAndLocalData() → sendDataToHistory()
+    // (evita duplicata no RTDB; NVS/offline inalterados — saveDataLocal ainda via sendDataToHistory quando offline)
 }
 
 // =============================================================================
@@ -560,7 +558,7 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     setpoints.set("tMin", 20.0);
     setpoints.set("uMax", 80.0);
     setpoints.set("uMin", 60.0);
-    setpoints.set("coSp", 400);
+    setpoints.set("coSp", 50);
     setpoints.set("co2Sp", 400);
     setpoints.set("tvocsSp", 100);
     json.set("setpoints", setpoints);
@@ -851,53 +849,98 @@ bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
 }
 
 void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
-    if(!authenticated) {
+    if (!authenticated) {
         Serial.println("User not authenticated. Cannot receive setpoints.");
         return;
     }
 
     String path = "/greenhouses/" + greenhouseId + "/setpoints";
-    
-    if (Firebase.getJSON(fbdo, path.c_str())) {
-        FirebaseJson *json = fbdo.jsonObjectPtr();
-        FirebaseJsonData result;
-        
-        struct Setpoints {
-            int   lux     = 5000;
-            float tMax    = 30.0f;
-            float tMin    = 20.0f;
-            float uMax    = 80.0f;
-            float uMin    = 60.0f;
-            int   coSp    = 400;
-            int   co2Sp   = 400;
-            int   tvocsSp = 100;
-        } setpoints;
 
-        int fieldsRead = 0;
-        if (json->get(result, "lux"))     { setpoints.lux     = result.intValue;   fieldsRead++; }
-        if (json->get(result, "tMax"))    { setpoints.tMax    = result.floatValue; fieldsRead++; }
-        if (json->get(result, "tMin"))    { setpoints.tMin    = result.floatValue; fieldsRead++; }
-        if (json->get(result, "uMax"))    { setpoints.uMax    = result.floatValue; fieldsRead++; }
-        if (json->get(result, "uMin"))    { setpoints.uMin    = result.floatValue; fieldsRead++; }
-        if (json->get(result, "coSp"))    { setpoints.coSp    = result.intValue;   fieldsRead++; }
-        if (json->get(result, "co2Sp"))   { setpoints.co2Sp   = result.intValue;   fieldsRead++; }
-        if (json->get(result, "tvocsSp")) { setpoints.tvocsSp = result.intValue;   fieldsRead++; }
-
-        if (fieldsRead > 0) {
-            Serial.printf("[FIREBASE] Setpoints recebidos (%d/8 campos):\n", fieldsRead);
-            actuators.applySetpoints(setpoints.lux, setpoints.tMin, setpoints.tMax,
-                                     setpoints.uMin, setpoints.uMax, setpoints.coSp,
-                                     setpoints.co2Sp, setpoints.tvocsSp);
-
-            if (fieldsRead < 8) {
-                Serial.printf("[FIREBASE] ⚠️ %d campo(s) ausentes — valores padrão mantidos.\n", 8 - fieldsRead);
-            }
-        } else {
-            Serial.println("[FIREBASE] ⚠️ Nenhum setpoint encontrado no JSON.");
-        }
-    } else {
-        Serial.println("Error receiving setpoints: " + fbdo.errorReason());
+    if (!Firebase.getJSON(fbdo, path.c_str())) {
+        Serial.println("[SETPOINTS] Erro ao ler setpoints: " + fbdo.errorReason());
+        return;
     }
+
+    FirebaseJson*    json = fbdo.jsonObjectPtr();
+    FirebaseJsonData result;
+
+    // Lê os valores do Firebase.
+    // Valores iniciais são os defaults do sistema — campos ausentes no Firebase
+    // não causam regressão nos setpoints já aplicados.
+    int   newLux     = 5000;
+    float newTMax    = 30.0f;
+    float newTMin    = 20.0f;
+    float newUMax    = 80.0f;
+    float newUMin    = 60.0f;
+    int   newCoSp    = 50;
+    int   newCo2Sp   = 400;
+    int   newTvocsSp = 100;
+
+    int fieldsRead = 0;
+    if (json->get(result, "lux"))     { newLux     = result.intValue;   fieldsRead++; }
+    if (json->get(result, "tMax"))    { newTMax    = result.floatValue; fieldsRead++; }
+    if (json->get(result, "tMin"))    { newTMin    = result.floatValue; fieldsRead++; }
+    if (json->get(result, "uMax"))    { newUMax    = result.floatValue; fieldsRead++; }
+    if (json->get(result, "uMin"))    { newUMin    = result.floatValue; fieldsRead++; }
+    if (json->get(result, "coSp"))    { newCoSp    = result.intValue;   fieldsRead++; }
+    if (json->get(result, "co2Sp"))   { newCo2Sp   = result.intValue;   fieldsRead++; }
+    if (json->get(result, "tvocsSp")) { newTvocsSp = result.intValue;   fieldsRead++; }
+
+    if (fieldsRead == 0) {
+        Serial.println("[SETPOINTS] ⚠️ Nenhum campo encontrado no nó /setpoints.");
+        return;
+    }
+
+    if (fieldsRead < 8) {
+        Serial.printf("[SETPOINTS] ⚠️ %d campo(s) ausentes — valores anteriores mantidos.\n",
+                      8 - fieldsRead);
+    }
+
+    // Cache estático: detecta se houve mudança real desde o último ciclo.
+    // Inicializado com valores impossíveis (-1 / -999) para garantir que a
+    // primeira execução sempre aplique e grave na NVS (cold-start).
+    static int   cachedLux     = -1;
+    static float cachedTMax    = -999.0f;
+    static float cachedTMin    = -999.0f;
+    static float cachedUMax    = -999.0f;
+    static float cachedUMin    = -999.0f;
+    static int   cachedCoSp    = -1;
+    static int   cachedCo2Sp   = -1;
+    static int   cachedTvocsSp = -1;
+
+    bool changed = false;
+    if (newLux     != cachedLux)                    changed = true;
+    if (newCoSp    != cachedCoSp)                   changed = true;
+    if (newCo2Sp   != cachedCo2Sp)                  changed = true;
+    if (newTvocsSp != cachedTvocsSp)                changed = true;
+    if (fabsf(newTMax - cachedTMax) > 0.01f)        changed = true;
+    if (fabsf(newTMin - cachedTMin) > 0.01f)        changed = true;
+    if (fabsf(newUMax - cachedUMax) > 0.01f)        changed = true;
+    if (fabsf(newUMin - cachedUMin) > 0.01f)        changed = true;
+
+    if (!changed) {
+        // Firebase tem os mesmos valores — não chama applySetpoints, não grava NVS
+        return;
+    }
+
+    // Valores mudaram: aplica e atualiza o cache
+    Serial.printf("[SETPOINTS] 📲 Setpoints alterados (%d/8 campos lidos): "
+                  "Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n",
+                  fieldsRead, newLux, newTMin, newTMax, newUMin, newUMax,
+                  newCoSp, newCo2Sp, newTvocsSp);
+
+    actuators.applySetpoints(newLux, newTMin, newTMax,
+                             newUMin, newUMax,
+                             newCoSp, newCo2Sp, newTvocsSp);
+
+    cachedLux     = newLux;
+    cachedTMax    = newTMax;
+    cachedTMin    = newTMin;
+    cachedUMax    = newUMax;
+    cachedUMin    = newUMin;
+    cachedCoSp    = newCoSp;
+    cachedCo2Sp   = newCo2Sp;
+    cachedTvocsSp = newTvocsSp;
 }
 
 bool FirebaseHandler::getDebugMode() {
@@ -1145,7 +1188,7 @@ void FirebaseHandler::repairMissingFields() {
         {"setpoints/tMin",    20.0, true },
         {"setpoints/uMax",    80.0, true },
         {"setpoints/uMin",    60.0, true },
-        {"setpoints/coSp",   400,   false},
+        {"setpoints/coSp",   50,    false},
         {"setpoints/co2Sp",  400,   false},
         {"setpoints/tvocsSp",100,   false},
     };

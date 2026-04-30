@@ -1,105 +1,95 @@
 /**
  * @file SensorController.cpp
- * @brief Implementação do controlador de sensores ambientais
- * @author Seu Nome  
- * @date 2024
- * @version 1.0
- * 
- * @details Este arquivo implementa o controlador responsável pela leitura
- * e gerenciamento de todos os sensores do sistema:
- * - DHT22 (temperatura e umidade)
- * - CCS811 (CO2 e TVOCs)
- * - LDR (luminosidade)
- * - MQ-7 (monóxido de carbono)
- * - Sensor de nível de água
- * 
- * @note Inclui mecanismos de verificação de integridade dos sensores
- * e tratamento de falhas com tentativas de recuperação.
+ * @brief Controlador de sensores ambientais (DHT22, CCS811, LDR, MQ-7, nível de água)
  */
 
 #include "SensorController.h"
-#include <DHT.h>
+#include <Adafruit_CCS811.h>
+#include <cmath>
+#include <type_traits>
 
-/**
- * @brief Inicializa todos os sensores do sistema
- * 
- * @details Realiza a configuração completa dos sensores:
- * - Configura pinos como entradas
- * - Inicializa DHT22 com verificações de funcionamento
- * - Inicializa CCS811 com timeout e tentativas
- * - Define valores iniciais para todas as variáveis
- * 
- * @note Inclui múltiplas tentativas para sensores que podem falhar
- * na inicialização (DHT22, CCS811)
- * 
- * @warning Sensores com falha na inicialização são marcados como
- * inoperantes e não serão utilizados nas leituras
- * 
- * @see SensorController::update()
- */
+// Garante API esperada da Adafruit CCS811 (readData → uint8_t, 0 = sucesso) sem fixar versão no platformio.ini
+static_assert(std::is_same<decltype(std::declval<Adafruit_CCS811>().readData()), uint8_t>::value,
+              "IFungi: atualize 'adafruit/Adafruit CCS811 Library' — readData() deve retornar uint8_t (0 = sucesso). Verifique release >= 1.1.x.");
+
+int SensorController::mq7PpmFromAdc(int adcRaw, float tempC, float rhPct, bool compensate) const {
+    if (adcRaw <= 0) return 0;
+    float v = (adcRaw / 4095.0f) * 3.3f;
+    if (v < 0.05f) v = 0.05f;
+    if (v >= MQ7_VC_VOLTS - 0.05f) v = MQ7_VC_VOLTS - 0.05f;
+
+    // Divisor típico: Vout = Vc * Rs / (Rs + RL) → Rs = RL * (Vc - Vout) / Vout  (Rs em kΩ)
+    float rsK = MQ7_RL_KOHM * (MQ7_VC_VOLTS - v) / v;
+    if (rsK < 0.01f) rsK = 0.01f;
+
+    if (compensate) {
+        // Correção leve RH/T (literatura MQ; não altera buffers do DHT — só usa cópias)
+        float env = 1.0f + 0.0018f * (tempC - 20.0f) - 0.004f * (rhPct - 50.0f) / 50.0f;
+        if (env < 0.6f) env = 0.6f;
+        if (env > 1.6f) env = 1.6f;
+        rsK /= env;
+    }
+
+    float ratio = rsK / MQ7_R0_KOHM;
+    if (ratio < 0.01f) ratio = 0.01f;
+
+    float ppm = MQ7_CURVE_A * powf(ratio, MQ7_CURVE_B);
+    if (ppm < 0.0f) ppm = 0.0f;
+    if (ppm > 2000.0f) ppm = 2000.0f;
+    return (int)(ppm + 0.5f);
+}
+
 void SensorController::begin() {
     Serial.println("[SENSOR] Inicializando controlador de sensores...");
-    
-    // Configuração dos pinos dos sensores
+
+    mq7WarmupUntil = millis() + 120000UL;
+    Serial.println("[SENSOR] MQ-7: aguardando ~120 s de estabilização antes de usar ppm (sem leitura de aquecedor).");
+
     pinMode(WATERLEVEL_PIN, INPUT);
     pinMode(LDR_PIN, INPUT);
     pinMode(MQ7_PIN, INPUT);
 
     Serial.println("[SENSOR] Configuração de pinos concluída");
     Serial.printf("[SENSOR] Threshold sensor água: %d\n", WATER_LEVEL_THRESHOLD);
-    
-    // =========================================================================
-    // INICIALIZAÇÃO DO SENSOR DHT22 (TEMPERATURA E UMIDADE)
-    // =========================================================================
-    
+
     Serial.println("[SENSOR] Inicializando DHT22...");
     dht.begin();
-    delay(2000); // Aguarda estabilização do sensor
-    
+    delay(2000);
+
     int dhtAttempts = 0;
     dhtOK = false;
-    
-    // Tentativas de inicialização do DHT22
+
     while (dhtAttempts < 3 && !dhtOK) {
         float tempTest = dht.readTemperature();
         float humidityTest = dht.readHumidity();
-        
-        // Verifica se as leituras são válidas (não NaN)
+
         if (!isnan(tempTest) && !isnan(humidityTest)) {
             dhtOK = true;
             Serial.println("[SENSOR] DHT22 inicializado com sucesso");
         } else {
             Serial.printf("[SENSOR] Tentativa %d: Falha na leitura do DHT22\n", dhtAttempts + 1);
             dhtAttempts++;
-            delay(1000); // Aguarda antes da próxima tentativa
+            delay(1000);
         }
     }
-    
-    // Relata falha permanente do DHT22
+
     if (!dhtOK) {
         Serial.println("[SENSOR] DHT22: ERRO - Sensor não responde");
     }
 
-    // =========================================================================
-    // INICIALIZAÇÃO DO SENSOR CCS811 (CO2 E TVOCs)
-    // =========================================================================
-    
     Serial.println("[SENSOR] Inicializando CCS811...");
     ccsOK = false;
-    
-    // Tentativas de inicialização do CCS811
+
     for (int attempt = 0; attempt < 3; attempt++) {
         if (ccs.begin()) {
             ccsOK = true;
             Serial.println("[SENSOR] CCS811 inicializado com sucesso");
-            
-            // Aguarda sensor ficar pronto para leitura (timeout 5s)
+
             unsigned long startTime = millis();
             while (!ccs.available() && (millis() - startTime < 5000)) {
                 delay(100);
             }
-            
-            // Verifica se sensor ficou pronto dentro do timeout
+
             if (ccs.available()) {
                 Serial.println("[SENSOR] CCS811 pronto para leitura");
                 break;
@@ -112,15 +102,10 @@ void SensorController::begin() {
             delay(1000);
         }
     }
-    
-    // Relata falha permanente do CCS811
+
     if (!ccsOK) {
         Serial.println("[SENSOR] CCS811: ERRO - Sensor não inicializado");
     }
-
-    // =========================================================================
-    // INICIALIZAÇÃO DE VARIÁVEIS DE ESTADO
-    // =========================================================================
 
     lastUpdate = 0;
     co2 = 0;
@@ -130,50 +115,26 @@ void SensorController::begin() {
     humidity = 0;
     light = 0;
     waterLevel = false;
-    
+
     Serial.println("[SENSOR] Controlador de sensores inicializado com sucesso");
 }
 
-/**
- * @brief Atualiza leituras de todos os sensores
- * 
- * @details Executa leituras periódicas dos sensores com diferentes taxas:
- * - Leituras básicas (LDR, MQ-7): a cada 2 segundos
- * - DHT22: a cada 4 segundos (leitura mais lenta)
- * - CCS811: a cada 6 segundos (leitura mais lenta)
- * - Sensor de água: a cada 2 segundos com debug periódico
- * 
- * @note Utiliza contador estático para alternar leituras lentas
- * e inclui verificações de integridade dos dados
- * 
- * @see SensorController::begin()
- */
 void SensorController::update() {
-    if(millis() - lastUpdate >= 2000) {
+    if (millis() - lastUpdate >= 2000) {
         static unsigned int readCount = 0;
-        
-        // =====================================================================
-        // LEITURAS BÁSICAS (RÁPIDAS)
-        // =====================================================================
-        
-        light = analogRead(LDR_PIN);
-        co    = analogRead(MQ7_PIN);
-        
-        // =====================================================================
-        // LEITURA DHT22 (TEMPERATURA E UMIDADE) - A CADA 2 CICLOS
-        // =====================================================================
-        
-        if(readCount % 2 == 0) {
-            if(dhtOK) {
+
+        light         = analogRead(LDR_PIN);
+        int mqAdc     = analogRead(MQ7_PIN);
+
+        if (readCount % 2 == 0) {
+            if (dhtOK) {
                 float newTemp = dht.readTemperature();
                 float newHum  = dht.readHumidity();
-                
+
                 if (isnan(newTemp) || isnan(newHum)) {
                     dhtFailCount++;
                     Serial.printf("[SENSOR] DHT22: leitura inválida (%d/3 falhas consecutivas)\n", dhtFailCount);
-                    
-                    // CORREÇÃO: após 3 falhas consecutivas marca como inoperante,
-                    // mas agenda tentativa de recuperação em vez de falha permanente.
+
                     if (dhtFailCount >= 3) {
                         dhtOK = false;
                         dhtRecoveryTime = millis();
@@ -182,12 +143,15 @@ void SensorController::update() {
                 } else {
                     temperature  = newTemp;
                     humidity     = newHum;
-                    dhtFailCount = 0; // reseta contador em leitura bem-sucedida
+                    dhtFailCount = 0;
+
+                    if (ccsOK) {
+                        float hEnv = humidity;
+                        float tEnv = temperature;
+                        ccs.setEnvironmentalData(hEnv, tEnv);
+                    }
                 }
             } else {
-                // CORREÇÃO: tenta reinicializar o DHT22 após 30 segundos de inatividade.
-                // Evita que uma falha momentânea desative o sensor permanentemente
-                // até o próximo reboot.
                 if (millis() - dhtRecoveryTime >= 30000) {
                     Serial.println("[SENSOR] DHT22: tentando recuperação...");
                     dht.begin();
@@ -200,48 +164,49 @@ void SensorController::update() {
                         temperature  = testTemp;
                         humidity     = testHum;
                         Serial.println("[SENSOR] DHT22: RECUPERADO com sucesso");
+                        if (ccsOK) {
+                            ccs.setEnvironmentalData(humidity, temperature);
+                        }
                     } else {
-                        dhtRecoveryTime = millis(); // agenda próxima tentativa
+                        dhtRecoveryTime = millis();
                         Serial.println("[SENSOR] DHT22: recuperação falhou, nova tentativa em 30s");
                     }
                 }
             }
         }
-        
-        // =====================================================================
-        // LEITURA CCS811 (CO2 E TVOCs) - A CADA 3 CICLOS
-        // =====================================================================
-        
-        if(readCount % 3 == 0) {
-            if(ccsOK) {
+
+        if (readCount % 3 == 0) {
+            if (ccsOK) {
                 if (ccs.available()) {
-                    if (!ccs.readData()) {
+                    uint8_t st = ccs.readData();
+                    if (st == 0) {
                         co2          = ccs.geteCO2();
                         tvocs        = ccs.getTVOC();
-                        ccsFailCount = 0; // reseta contador em leitura bem-sucedida
+                        ccsFailCount = 0;
                     } else {
                         ccsFailCount++;
-                        Serial.printf("[SENSOR] CCS811: falha na leitura (%d/3 falhas consecutivas)\n", ccsFailCount);
-                        
-                        // CORREÇÃO: mesma lógica de recuperação do DHT22
+                        Serial.printf("[SENSOR] CCS811: falha na leitura código %u (%d/3)\n", st, ccsFailCount);
+
                         if (ccsFailCount >= 3) {
-                            ccsOK            = false;
-                            ccsRecoveryTime  = millis();
+                            ccsOK           = false;
+                            ccsRecoveryTime = millis();
                             Serial.println("[SENSOR] CCS811: INOPERANTE — tentativa de recuperação em 30s");
                         }
                     }
                 }
             } else {
-                // Tenta reinicializar o CCS811 após 30 segundos
                 if (millis() - ccsRecoveryTime >= 30000) {
                     Serial.println("[SENSOR] CCS811: tentando recuperação...");
                     if (ccs.begin()) {
                         unsigned long t = millis();
                         while (!ccs.available() && millis() - t < 3000) delay(100);
                         if (ccs.available()) {
-                            ccsOK            = true;
-                            ccsFailCount     = 0;
+                            ccsFailCount = 0;
+                            ccsOK        = true;
                             Serial.println("[SENSOR] CCS811: RECUPERADO com sucesso");
+                            if (dhtOK) {
+                                ccs.setEnvironmentalData(humidity, temperature);
+                            }
                         } else {
                             ccsRecoveryTime = millis();
                             Serial.println("[SENSOR] CCS811: recuperação falhou, nova tentativa em 30s");
@@ -254,82 +219,38 @@ void SensorController::update() {
             }
         }
 
-        // =====================================================================
-        // LEITURA DO SENSOR DE NÍVEL DE ÁGUA
-        // =====================================================================
-        
+        if (millis() < mq7WarmupUntil) {
+            co = 0;
+        } else {
+            float tComp = dhtOK ? temperature : 20.0f;
+            float hComp = dhtOK ? humidity : 50.0f;
+            co = mq7PpmFromAdc(mqAdc, tComp, hComp, dhtOK);
+        }
+
         int waterSensorValue = analogRead(WATERLEVEL_PIN);
-        
-        /**
-         * @brief Lógica do sensor de nível de água
-         * @details 
-         * - Valor ALTO (>1917) = Sensor SECO = ÁGUA BAIXA (true)
-         * - Valor BAIXO (<1917) = Sensor MOLHADO = ÁGUA OK (false)
-         */
         waterLevel = (waterSensorValue > WATER_LEVEL_THRESHOLD);
-        
-        // Debug detalhado do sensor de água (a cada 5 ciclos)
-        if(readCount % 5 == 0) {
+
+        if (readCount % 5 == 0) {
             float voltage = (waterSensorValue / 4095.0) * 3.3;
-            Serial.printf("[SENSOR] Água: %d (%1.2fV) -> %s\n", 
+            Serial.printf("[SENSOR] Água: %d (%1.2fV) -> %s\n",
                          waterSensorValue, voltage,
                          waterLevel ? "BAIXA" : "OK");
         }
-        
-        // Log resumido de todos os sensores (a cada 10 ciclos)
-        if(readCount % 10 == 0) {
-            Serial.printf("[SENSOR] DHT22: %.1fC, %.1f%%, LDR: %d, MQ-7: %d, CCS811: %d ppm\n", 
+
+        if (readCount % 10 == 0) {
+            Serial.printf("[SENSOR] DHT22: %.1fC, %.1f%%, LDR: %d, CO: %d ppm, CCS811: %d ppm CO2\n",
                          temperature, humidity, light, co, co2);
         }
-        
-        // Atualiza timestamp e incrementa contador
+
         lastUpdate = millis();
         readCount++;
     }
 }
 
-// =============================================================================
-// FUNÇÕES DE ACESSO AOS DADOS DOS SENSORES
-// =============================================================================
-
-/**
- * @brief Obtém a temperatura atual
- * @return Temperatura em graus Celsius
- */
 float SensorController::getTemperature() { return temperature; }
-
-/**
- * @brief Obtém a umidade atual  
- * @return Umidade relativa em porcentagem
- */
 float SensorController::getHumidity() { return humidity; }
-
-/**
- * @brief Obtém o nível de CO2
- * @return Concentração de CO2 em ppm (partes por milhão)
- */
 int SensorController::getCO2() { return co2; }
-
-/**
- * @brief Obtém o nível de monóxido de carbono
- * @return Leitura analógica do sensor MQ-7 (0-4095)
- */
 int SensorController::getCO() { return co; }
-
-/**
- * @brief Obtém o nível de compostos orgânicos voláteis
- * @return Concentração de TVOCs em ppb (partes por bilhão)
- */
 int SensorController::getTVOCs() { return tvocs; }
-
-/**
- * @brief Obtém o nível de luminosidade
- * @return Leitura analógica do LDR (0-4095)
- */
 int SensorController::getLight() { return light; }
-
-/**
- * @brief Obtém o estado do nível de água
- * @return true se nível de água está baixo, false se normal
- */
 bool SensorController::getWaterLevel() { return waterLevel; }

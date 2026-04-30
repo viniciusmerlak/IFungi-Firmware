@@ -396,7 +396,7 @@ void setupSensorsAndActuators() {
     // Carrega setpoints do NVS ou usa valores padrão
     if (!actuators.loadSetpointsNVS()) {
         Serial.println("⚙️ Using default setpoints");
-        actuators.applySetpoints(5000, 20.0, 30.0, 60.0, 80.0, 400, 400, 100);
+        actuators.applySetpoints(5000, 20.0, 30.0, 60.0, 80.0, 50, 400, 100);
     }
     
     // Conecta atuadores ao handler do Firebase para sincronização
@@ -718,38 +718,30 @@ void sendDataToHistory() {
  */
 void verifyConnectionStatus() {
     static unsigned long lastCheck = 0;
+    static bool prevWifiUp = true;
     const unsigned long CHECK_INTERVAL = 30000;
-    
+
     if (millis() - lastCheck > CHECK_INTERVAL) {
         lastCheck = millis();
-        
-        // Verifica e tenta recuperar conexão WiFi
-        if (WiFi.status() != WL_CONNECTED) {
-            Serial.println("⚠️ WiFi disconnected! Attempting to reconnect...");
+
+        bool up = (WiFi.status() == WL_CONNECTED);
+
+        if (!up) {
+            Serial.println("⚠️ WiFi desconectado — WiFi.reconnect() (nova checagem em ~30s)");
             WiFi.reconnect();
-            
-            int reconnectAttempts = 0;
-            while (WiFi.status() != WL_CONNECTED && reconnectAttempts < 5) {
-                delay(1000);
-                reconnectAttempts++;
-            }
-            
-            if (WiFi.status() == WL_CONNECTED) {
-                Serial.println("✅ WiFi reconnected");
-                // Tenta enviar dados pendentes após reconexão
+        } else {
+            if (!prevWifiUp) {
+                Serial.println("✅ WiFi reconectado — enviando dados locais pendentes (NVS)");
                 if (firebase.isAuthenticated()) {
                     firebase.sendLocalData();
                 }
-            } else {
-                Serial.println("❌ WiFi reconnection failed");
+            }
+            if (firebase.isAuthenticated() && !Firebase.ready()) {
+                Serial.println("⚠️ Firebase não pronto — refreshTokenIfNeeded()");
+                firebase.refreshTokenIfNeeded();
             }
         }
-        
-        // Verifica e recupera conexão Firebase
-        if (firebase.isAuthenticated() && !Firebase.ready()) {
-            Serial.println("⚠️ Firebase disconnected! Attempting to reconnect...");
-            firebase.refreshTokenIfNeeded();
-        }
+        prevWifiUp = up;
     }
 }
 
