@@ -777,7 +777,8 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
             Serial.println("Greenhouse found. Checking structure...");
             if (!isGreenhouseStructureComplete(greenhouseId)) {
                 Serial.println("[firebase] WARN: Estrutura incompleta apos tentativa de reparo. "
-                               "Continuando sem recriar para preservar dados do usuario.");
+                               "Recriando estrutura (dados do usuario serao preservados).");
+                createInitialGreenhouse(userUID, userUID);
             } else {
                 Serial.println("Greenhouse structure is complete.");
             }
