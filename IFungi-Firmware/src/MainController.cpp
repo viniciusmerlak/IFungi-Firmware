@@ -160,7 +160,9 @@ void lifeSupportTask(void* parameter) {
                 sensors.getCO2(),
                 sensors.getTVOCs(),
                 sensors.getWaterLevel(),
-                sensors.isDHTHealthy()
+                sensors.isDHTHealthy(),
+                false   // allowFirebaseWrite=false: Firebase (TLS/lwip) não pode ser
+                        // chamado de uma FreeRTOS task fora da loopTask (pthread TLS inválido)
             );
             lastActTs = now;
         }

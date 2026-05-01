@@ -44,10 +44,13 @@ public:
      * @param tvocs       TVOCs ppb
      * @param waterLevel  true=água baixa
      * @param dhtHealthy  false=DHT inoperante → Peltier BLOQUEADO por segurança
+     * @param allowFirebaseWrite  Permite que o controlador envie atualizações ao Firebase
+     *                            (desative quando chamado de uma thread secundária)
      */
     void controlAutomatically(float temp, float humidity, int light,
                                int co, int co2, int tvocs,
-                               bool waterLevel, bool dhtHealthy = true);
+                               bool waterLevel, bool dhtHealthy = true,
+                               bool allowFirebaseWrite = true);
 
     void setDebugMode(bool debug);
     void setManualStates(bool relay1, bool relay2, bool relay3, bool relay4,
@@ -138,6 +141,8 @@ private:
     bool lastDevModeState    = false;
     TaskHandle_t ledPwmTaskHandle = nullptr;
     bool _loadedScheduleFromNvs   = false;
+
+    bool _allowFirebaseUpdates = true;   // proteção contra chamadas multi‑thread
 
     void updateFirebaseState();
     void updateFirebaseStateImmediately();

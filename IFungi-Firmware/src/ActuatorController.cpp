@@ -298,10 +298,15 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
 
 void ActuatorController::controlAutomatically(float temp, float humidity, int light,
                                                int co, int co2, int tvocs,
-                                               bool waterLevel, bool dhtHealthy) {
+                                               bool waterLevel, bool dhtHealthy,
+                                               bool allowFirebaseWrite) {
     if (debugMode) {
         return;
     }
+
+    // Propaga o flag para que controlPeltier/controlLEDs/controlRelay
+    // saibam se podem fazer writes Firebase (false quando chamado da lifeSupportTask).
+    _allowFirebaseUpdates = allowFirebaseWrite;
 
     // ── PELTIER ────────────────────────────────────────────────────────────────
     if (inCooldown && (millis() - cooldownStart >= cooldownTime)) {
@@ -414,7 +419,10 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
     }
 
     // ── ATUALIZAÇÃO FIREBASE ──────────────────────────────────────────────────
-    if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && firebaseHandler->isFirebaseReady()) {
+    // allowFirebaseWrite=false quando chamado da lifeSupportTask (core 0):
+    // chamadas TLS/lwip fora da loopTask causam LoadProhibited (pthread TLS inválido).
+    if (allowFirebaseWrite &&
+        firebaseHandler != nullptr && firebaseHandler->isAuthenticated() && firebaseHandler->isFirebaseReady()) {
         if (millis() - lastUpdateTime > 5000 && canWriteToFirebase()) {
             updateFirebaseState();
             lastUpdateTime = millis();
@@ -482,7 +490,8 @@ void ActuatorController::controlPeltier(bool cooling, bool on) {
         }
     }
 
-    if (stateChanged && firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
+    if (stateChanged && _allowFirebaseUpdates &&
+        firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
         firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
         updateFirebaseStateImmediately();
     }
@@ -506,7 +515,8 @@ void ActuatorController::controlLEDs(bool on, int intensity) {
         }
     }
 
-    if (stateChanged && firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
+    if (stateChanged && _allowFirebaseUpdates &&
+        firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
         firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
         updateFirebaseStateImmediately();
     }
@@ -550,7 +560,8 @@ void ActuatorController::controlRelay(uint8_t relayNumber, bool state) {
     if (stateChanged) {
         Serial.printf("[actuator] Rele %d: %s\n", relayNumber, state ? "LIGADO" : "DESLIGADO");
 
-        if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
+        if (_allowFirebaseUpdates &&
+            firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
             firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
             updateFirebaseStateImmediately();
         }
