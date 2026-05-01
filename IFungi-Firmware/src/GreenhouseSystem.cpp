@@ -573,6 +573,52 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
         }
     }
 
+    // ── Preservar dados do usuario antes de sobrescrever ────────────────────
+    // Se a estufa ja existir, lemos setpoints, led_schedule e operation_mode
+    // do Firebase para nao perder configuracoes do usuario (ex: apos OTA).
+    String path = "/greenhouses/" + greenhouseId;
+    bool hadExistingData = false;
+
+    // Defaults (usados apenas se nao existir dado no Firebase)
+    int   savedLux = 5000, savedCoSp = 50, savedCo2Sp = 400, savedTvocsSp = 100;
+    float savedTMax = 30.0f, savedTMin = 20.0f, savedUMax = 80.0f, savedUMin = 60.0f;
+
+    bool  savedSchedEnabled = false, savedSolarSim = false;
+    int   savedOnH = 6, savedOnM = 0, savedOffH = 20, savedOffM = 0, savedIntensity = 255;
+
+    String savedMode = "manual";
+
+    if (Firebase.getJSON(fbdo, path.c_str()) && fbdo.dataType() != "null") {
+        hadExistingData = true;
+        FirebaseJson *existing = fbdo.jsonObjectPtr();
+        FirebaseJsonData r;
+
+        // Preserva setpoints do usuario
+        if (existing->get(r, "setpoints/lux"))     savedLux     = r.intValue;
+        if (existing->get(r, "setpoints/tMax"))     savedTMax    = r.floatValue;
+        if (existing->get(r, "setpoints/tMin"))     savedTMin    = r.floatValue;
+        if (existing->get(r, "setpoints/uMax"))     savedUMax    = r.floatValue;
+        if (existing->get(r, "setpoints/uMin"))     savedUMin    = r.floatValue;
+        if (existing->get(r, "setpoints/coSp"))     savedCoSp    = r.intValue;
+        if (existing->get(r, "setpoints/co2Sp"))    savedCo2Sp   = r.intValue;
+        if (existing->get(r, "setpoints/tvocsSp"))  savedTvocsSp = r.intValue;
+
+        // Preserva led_schedule
+        if (existing->get(r, "led_schedule/scheduleEnabled")) savedSchedEnabled = r.boolValue;
+        if (existing->get(r, "led_schedule/solarSimEnabled")) savedSolarSim     = r.boolValue;
+        if (existing->get(r, "led_schedule/onHour"))          savedOnH          = r.intValue;
+        if (existing->get(r, "led_schedule/onMinute"))        savedOnM          = r.intValue;
+        if (existing->get(r, "led_schedule/offHour"))         savedOffH         = r.intValue;
+        if (existing->get(r, "led_schedule/offMinute"))       savedOffM         = r.intValue;
+        if (existing->get(r, "led_schedule/intensity"))       savedIntensity    = r.intValue;
+
+        // Preserva operation_mode
+        if (existing->get(r, "operation_mode/mode"))          savedMode = r.stringValue;
+
+        Serial.println("[firebase] Dados do usuario preservados antes de recriar estrutura");
+    }
+    // ────────────────────────────────────────────────────────────────────────
+
     FirebaseJson json;
     
     FirebaseJson actuators;
@@ -607,15 +653,16 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     sensorStatus.set("lastUpdate", (int)getCurrentTimestamp());
     json.set("sensor_status", sensorStatus);
 
+    // Usa setpoints preservados (ou defaults para estufa nova)
     FirebaseJson setpoints;
-    setpoints.set("lux", 5000);
-    setpoints.set("tMax", 30.0);
-    setpoints.set("tMin", 20.0);
-    setpoints.set("uMax", 80.0);
-    setpoints.set("uMin", 60.0);
-    setpoints.set("coSp", 50);
-    setpoints.set("co2Sp", 400);
-    setpoints.set("tvocsSp", 100);
+    setpoints.set("lux",     savedLux);
+    setpoints.set("tMax",    savedTMax);
+    setpoints.set("tMin",    savedTMin);
+    setpoints.set("uMax",    savedUMax);
+    setpoints.set("uMin",    savedUMin);
+    setpoints.set("coSp",    savedCoSp);
+    setpoints.set("co2Sp",   savedCo2Sp);
+    setpoints.set("tvocsSp", savedTvocsSp);
     json.set("setpoints", setpoints);
 
     json.set("niveis/agua", false);
@@ -639,18 +686,20 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     devmode.set("pwmValue", 0);
     json.set("devmode", devmode);
 
+    // Usa led_schedule preservado (ou defaults para estufa nova)
     FirebaseJson ledSched;
-    ledSched.set("scheduleEnabled", false);
-    ledSched.set("solarSimEnabled", false);
-    ledSched.set("onHour",    6);
-    ledSched.set("onMinute",  0);
-    ledSched.set("offHour",  20);
-    ledSched.set("offMinute", 0);
-    ledSched.set("intensity", 255);
+    ledSched.set("scheduleEnabled", savedSchedEnabled);
+    ledSched.set("solarSimEnabled", savedSolarSim);
+    ledSched.set("onHour",          savedOnH);
+    ledSched.set("onMinute",        savedOnM);
+    ledSched.set("offHour",         savedOffH);
+    ledSched.set("offMinute",       savedOffM);
+    ledSched.set("intensity",       savedIntensity);
     json.set("led_schedule", ledSched);
 
+    // Usa operation_mode preservado (ou default para estufa nova)
     FirebaseJson opMode;
-    opMode.set("mode",        "manual");
+    opMode.set("mode",        savedMode);
     opMode.set("lastChanged", (int)getCurrentTimestamp());
     opMode.set("changedBy",   "esp32");
     json.set("operation_mode", opMode);
@@ -668,9 +717,12 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     otaNode.set("notes",     "Insira a URL HTTPS do .bin e mude available para true");
     json.set("ota", otaNode);
 
-    String path = "/greenhouses/" + greenhouseId;
     if (Firebase.setJSON(fbdo, path.c_str(), json)) {
-        Serial.println("[firebase] Greenhouse created successfully with complete structure");
+        if (hadExistingData) {
+            Serial.println("[firebase] Greenhouse recreated — user data preserved (setpoints, led_schedule, mode)");
+        } else {
+            Serial.println("[firebase] Greenhouse created successfully with complete structure");
+        }
         checkUserPermission(userUID, greenhouseId);
     } else {
         Serial.print("[firebase] Error creating greenhouse: ");
@@ -681,7 +733,11 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
             Firebase.refreshToken(&config);
             delay(1000);
             if (Firebase.ready() && Firebase.setJSON(fbdo, path.c_str(), json)) {
-                Serial.println("[firebase] Greenhouse created after renewing token");
+                if (hadExistingData) {
+                    Serial.println("[firebase] Greenhouse recreated after token renewal — user data preserved");
+                } else {
+                    Serial.println("[firebase] Greenhouse created after renewing token");
+                }
                 checkUserPermission(userUID, greenhouseId);
             }
         }
@@ -720,8 +776,8 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
         if (fbdo.dataType() != "null") {
             Serial.println("Greenhouse found. Checking structure...");
             if (!isGreenhouseStructureComplete(greenhouseId)) {
-                Serial.println("Greenhouse structure incomplete after repair attempt.");
-                createInitialGreenhouse(userUID, userUID);
+                Serial.println("[firebase] WARN: Estrutura incompleta apos tentativa de reparo. "
+                               "Continuando sem recriar para preservar dados do usuario.");
             } else {
                 Serial.println("Greenhouse structure is complete.");
             }
