@@ -765,11 +765,6 @@ void loop() {
         handleRepairAndOTA();
         verifyConnectionStatus();
         otaHandler.handle();
-    } else {
-        // Modo suporte de vida: apenas tenta reconectar e verifica OTA
-        handleWiFiReconnection();
-        // Tenta enviar logs pendentes se Firebase voltar
-        RemoteLogger::flush();
     }
 
     // Reconexão sempre ativa, independente do modo

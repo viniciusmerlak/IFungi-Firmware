@@ -46,6 +46,7 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     while (millis() - startTime < TIMEOUT) {
         if (Firebase.ready()) {
             authenticated = true;
+            initialized   = true;
             userUID = String(auth.token.uid.c_str());
             greenhouseId = "IFUNGI-" + getMacAddress();
 
@@ -1170,7 +1171,7 @@ void FirebaseHandler::ensureOTANodeExists() {
     otaNode.set("url",       "");
     otaNode.set("notes",     "Insira a URL HTTPS do .bin e mude available para true");
 
-    if (Firebase.setJSON(fbdo, basePath.c_str(), otaNode)) {
+    if (Firebase.updateNode(fbdo, basePath.c_str(), otaNode)) {
         Serial.println("[ota] No OTA criado no RTDB");
     } else {
         Serial.println("[ota] Falha ao criar no OTA: " + fbdo.errorReason());
@@ -1202,7 +1203,7 @@ void FirebaseHandler::ensureLEDScheduleExists(ActuatorController& actuators) {
     ls.set("offMinute",       actuators.ledScheduler.offMinute);
     ls.set("intensity",       actuators.ledScheduler.configIntensity);
 
-    if (Firebase.setJSON(fbdo, path.c_str(), ls)) {
+    if (Firebase.updateNode(fbdo, path.c_str(), ls)) {
         Serial.println("[led] No led_schedule criado pelo ESP32");
     } else {
         Serial.println("[led] Falha ao criar led_schedule: " + fbdo.errorReason());
@@ -1230,7 +1231,7 @@ void FirebaseHandler::ensureOperationModeExists(ActuatorController& actuators) {
     opMode.set("lastChanged", (int)getCurrentTimestamp());
     opMode.set("changedBy",   "esp32");
 
-    if (Firebase.setJSON(fbdo, base.c_str(), opMode)) {
+    if (Firebase.updateNode(fbdo, base.c_str(), opMode)) {
         Serial.println("[mode] No operation_mode criado pelo ESP32");
     } else {
         Serial.println("[mode] Falha ao criar operation_mode: " + fbdo.errorReason());
@@ -1301,26 +1302,21 @@ void FirebaseHandler::repairMissingFields() {
     bool   dirty = false;
     FirebaseJson patch;
 
-    if (!Firebase.get(fbdo, base.c_str()) || fbdo.dataType() == "null") {
+    // Leitura UNICA de toda a estufa. Todas as verificacoes abaixo usam o JSON
+    // ja carregado na RAM, sem chamadas extras ao Firebase. Isso elimina a falha
+    // em cascata causada pelo compartilhamento do objeto fbdo: se um get() falhava
+    // por instabilidade de rede, os gets seguintes tambem falhavam e o repair
+    // sobrescrevia dados do usuario com defaults.
+    if (!Firebase.getJSON(fbdo, base.c_str()) || fbdo.dataType() == "null") {
         Serial.println("[firebase] greenhouse ausente no RTDB — recriando estrutura completa");
         createInitialGreenhouse(userUID, userUID);
         return;
     }
 
-    // SETPOINTS — verificação do nó inteiro, NUNCA campo por campo.
-    //
-    // POR QUE campo-por-campo estava quebrando:
-    //   Firebase.get(fbdo, "setpoints/tMax") usa o mesmo objeto fbdo que todas
-    //   as outras operações. Se qualquer get() anterior falhou (timeout, resposta
-    //   parcial, SSL reset), o fbdo fica em estado de erro e os gets seguintes
-    //   retornam false / dataType=="null" — mesmo que o campo exista no banco.
-    //   Isso fazia o repair sobrescrever tMax=23 (usuário) com tMax=30 (default)
-    //   a cada ciclo de 5 minutos que sofresse qualquer instabilidade de rede.
-    //
-    // CORREÇÃO: uma única leitura do nó pai /setpoints. Se existir com algum dado
-    //   → pertence ao usuário, não toca. Só cria se o nó inteiro estiver ausente.
-    if (!Firebase.get(fbdo, (base + "/setpoints").c_str()) ||
-        fbdo.dataType() == "null") {
+    FirebaseJson *root = fbdo.jsonObjectPtr();
+    FirebaseJsonData r;
+
+    if (!root->get(r, "setpoints")) {
         FirebaseJson sp;
         sp.set("lux",     5000);
         sp.set("tMax",    30.0f);
@@ -1335,8 +1331,7 @@ void FirebaseHandler::repairMissingFields() {
         Serial.println("[repair] WARN: No /setpoints ausente — criando com defaults");
     }
 
-    if (!Firebase.get(fbdo, (base + "/led_schedule").c_str()) ||
-        fbdo.dataType() == "null") {
+    if (!root->get(r, "led_schedule")) {
         FirebaseJson ls;
         ls.set("scheduleEnabled", false); ls.set("solarSimEnabled", false);
         ls.set("onHour", 6); ls.set("onMinute", 0);
@@ -1347,8 +1342,7 @@ void FirebaseHandler::repairMissingFields() {
         Serial.println("[repair] WARN: Campo ausente: led_schedule");
     }
 
-    if (!Firebase.get(fbdo, (base + "/ota").c_str()) ||
-        fbdo.dataType() == "null") {
+    if (!root->get(r, "ota")) {
         FirebaseJson ota;
         ota.set("available", false); ota.set("version", "");
         ota.set("url", ""); ota.set("notes", "");
@@ -1357,8 +1351,7 @@ void FirebaseHandler::repairMissingFields() {
         Serial.println("[repair] WARN: Campo ausente: ota");
     }
 
-    if (!Firebase.get(fbdo, (base + "/operation_mode").c_str()) ||
-        fbdo.dataType() == "null") {
+    if (!root->get(r, "operation_mode")) {
         FirebaseJson opMode;
         opMode.set("mode", "manual");
         opMode.set("lastChanged", (int)getCurrentTimestamp());
@@ -1368,15 +1361,13 @@ void FirebaseHandler::repairMissingFields() {
         Serial.println("[repair] WARN: Campo ausente: operation_mode");
     }
 
-    if (!Firebase.get(fbdo, (base + "/debug_mode").c_str()) ||
-        fbdo.dataType() == "null") {
+    if (!root->get(r, "debug_mode")) {
         patch.set("debug_mode", false);
         dirty = true;
         Serial.println("[repair] WARN: Campo ausente: debug_mode");
     }
 
-    if (!Firebase.get(fbdo, (base + "/sensor_status").c_str()) ||
-        fbdo.dataType() == "null") {
+    if (!root->get(r, "sensor_status")) {
         FirebaseJson ss;
         ss.set("dht22_sensorError", "OK");
         ss.set("ccs811_sensorError", "OK");
@@ -1388,24 +1379,18 @@ void FirebaseHandler::repairMissingFields() {
         dirty = true;
         Serial.println("[repair] WARN: Campo ausente: sensor_status");
     } else {
-        struct SensorStatusDefault {
-            const char* key;
-            const char* value;
-        };
-        const SensorStatusDefault ssDefaults[] = {
-            {"sensor_status/dht22_sensorError", "OK"},
-            {"sensor_status/ccs811_sensorError", "OK"},
-            {"sensor_status/mq07_sensorError", "SensorError03"},
-            {"sensor_status/ldr_sensorError", "OK"},
-            {"sensor_status/waterlevel_sensorError", "OK"},
-        };
-        for (const auto& f : ssDefaults) {
-            if (!Firebase.get(fbdo, (base + "/" + String(f.key)).c_str()) || fbdo.dataType() == "null") {
-                patch.set(f.key, f.value);
+        const char* ssKeys[]   = {"dht22_sensorError", "ccs811_sensorError",
+                                   "mq07_sensorError", "ldr_sensorError",
+                                   "waterlevel_sensorError"};
+        const char* ssDefaults[] = {"OK", "OK", "SensorError03", "OK", "OK"};
+        for (int i = 0; i < 5; i++) {
+            String path = String("sensor_status/") + ssKeys[i];
+            if (!root->get(r, path.c_str())) {
+                patch.set(path.c_str(), ssDefaults[i]);
                 dirty = true;
             }
         }
-        if (!Firebase.get(fbdo, (base + "/sensor_status/lastUpdate").c_str()) || fbdo.dataType() == "null") {
+        if (!root->get(r, "sensor_status/lastUpdate")) {
             patch.set("sensor_status/lastUpdate", (int)getCurrentTimestamp());
             dirty = true;
         }
