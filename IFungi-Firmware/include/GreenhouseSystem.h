@@ -6,6 +6,7 @@
 #include <nvs_flash.h>
 #include "ActuatorController.h"
 #include "OperationMode.h"
+#include "RemoteLogger.h"
 #include <Preferences.h>
 #include <NTPClient.h>
 #include <WiFiUdp.h>
@@ -117,6 +118,24 @@ public:
 
     // Auto-repair
     void repairMissingFields();
+
+    // ── Logger remoto ────────────────────────────────────────────────────────
+
+    /**
+     * @brief Inicializa o RemoteLogger com as credenciais desta instância
+     *
+     * @details Deve ser chamado após autenticação bem-sucedida.
+     * Passa o ponteiro do fbdo e o greenhouseId ao RemoteLogger,
+     * e chama ensureLogNodeExists() para criar o nó no Firebase.
+     *
+     * @param minLevel Nível mínimo a enviar ao Firebase (padrão: LOG_INFO)
+     */
+    void initLogger(LogLevel minLevel = LOG_INFO);
+
+    /**
+     * @brief Garante que o nó /logs existe no Firebase
+     */
+    void ensureLogNodeExists();
 
 private:
     String getMacAddress();

@@ -11,8 +11,6 @@ String FirebaseHandler::getMacAddress() {
 bool FirebaseHandler::authenticate(const String& email, const String& password) {
     // SEGURANÇA: armazenamos em variáveis membro para garantir que os c_str()
     // não apontem para stack que será desalocada após o retorno desta função.
-    // config.api_key e auth.user.*  precisam de ponteiros válidos durante toda
-    // a sessão Firebase — não apenas durante a chamada de Firebase.begin().
     static String _apiKey;
     static String _dbUrl;
     static String _email;
@@ -32,32 +30,44 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     auth.user.email       = _email.c_str();
     auth.user.password    = _password.c_str();
     config.database_url   = _dbUrl.c_str();
-    
+
+    // CORREÇÃO (v1.2.2): token_status_callback alimenta o watchdog enquanto
+    // Firebase.begin() processa a autenticação em background. Sem ele, o loop
+    // de espera abaixo segurava o core 1 por até 30 s, disparando o TWDT
+    // quando a lifeSupportTask estava ativa no core 0.
+    config.token_status_callback = tokenStatusCallback;
+
     Firebase.begin(&config, &auth);
-    
-    // Aguarda autenticação com timeout de 30 segundos
+
     Serial.print("[firebase] Aguardando autenticação");
     unsigned long startTime = millis();
     const unsigned long TIMEOUT = 30000;
-    
+
     while (millis() - startTime < TIMEOUT) {
         if (Firebase.ready()) {
             authenticated = true;
             userUID = String(auth.token.uid.c_str());
             greenhouseId = "IFUNGI-" + getMacAddress();
-            
+
             Serial.println("\n[firebase] Autenticação bem-sucedida!");
             Serial.print("[firebase] UID: "); Serial.println(userUID);
-            
+            RLOG_INFO("[firebase]", "Autenticado com sucesso — sistema online");
+
             verifyGreenhouse();
             checkUserPermission(userUID, greenhouseId);
             return true;
         }
-        delay(500);
+        // CORREÇÃO (v1.2.2): vTaskDelay em vez de delay() para ceder ao
+        // scheduler do FreeRTOS e alimentar o watchdog durante a espera.
+        // delay() chama vTaskDelay internamente mas sem yield explícito,
+        // o que em algumas versões do core pode acumular 'ticks perdidos'
+        // e travar outras tasks (como lifeSupportTask no core 0).
+        vTaskDelay(pdMS_TO_TICKS(500));
         Serial.print(".");
     }
-    
+
     Serial.println("\n[firebase] ERRO - Autenticação expirada (timeout)");
+    RLOG_ERROR("[firebase]", "Autenticação expirada (timeout 30s) — verifique credenciais e conexão");
     return false;
 }
 
@@ -91,6 +101,7 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
         Serial.println("[firebase] Estados dos atuadores atualizados com sucesso");
     } else {
         Serial.println("[firebase] ERRO - Falha ao atualizar atuadores: " + fbdo.errorReason());
+        RLOG_FMT(LOG_ERROR, "[firebase]", "Falha ao atualizar atuadores: %s", fbdo.errorReason().c_str());
     }
 }
 
@@ -170,14 +181,24 @@ unsigned long FirebaseHandler::getCurrentTimestamp() {
         timeClient.update();
         return timeClient.getEpochTime();
     } else {
-        static unsigned long millisOffset = 0;
-        if (millisOffset == 0) {
-            if (initializeNVS() && preferences.begin(NAMESPACE, true)) {
-                millisOffset = preferences.getULong("ultimo_timestamp", 0) - (millis() / 1000);
-                preferences.end();
+        // Fallback offline: usa millis() relativo sem tocar na NVS
+        // para evitar spam de erros NOT_FOUND quando NVS foi apagada.
+        static unsigned long millisOffsetCalc = 0;
+        static bool offsetLoaded = false;
+
+        if (!offsetLoaded && nvsInitialized) {
+            // Só tenta carregar o offset se a NVS foi inicializada com sucesso
+            Preferences prefs;
+            if (prefs.begin(NAMESPACE, true)) {
+                unsigned long saved = prefs.getULong("ultimo_timestamp", 0);
+                if (saved > 0) {
+                    millisOffsetCalc = saved - (millis() / 1000);
+                }
+                prefs.end();
             }
+            offsetLoaded = true;
         }
-        return (millis() / 1000) + millisOffset;
+        return (millis() / 1000) + millisOffsetCalc;
     }
 }
 
@@ -199,28 +220,27 @@ void FirebaseHandler::saveDataLocally(float temp, float humidity, int co2, int c
         return;
     }
     
-    if (!preferences.begin(NAMESPACE, false)) {
+    Preferences prefs;
+    if (!prefs.begin(NAMESPACE, false)) {
         Serial.println("Failed to open Preferences for writing");
         return;
     }
     
-    int numRecords = preferences.getInt("num_registros", 0);
+    int numRecords = prefs.getInt("num_registros", 0);
     
-    // Cada registro é serializado como um único JSON numa chave "reg_N".
-    // 50 registros = 50 entradas + metadados → bem dentro do limite NVS.
     if (numRecords >= MAX_RECORDS) {
         // Descarta o registro mais antigo (índice 0) deslocando todos
         for (int i = 1; i < MAX_RECORDS; i++) {
-            String src = preferences.getString(("reg_" + String(i)).c_str(), "");
+            String src = prefs.getString(("reg_" + String(i)).c_str(), "");
             if (src.length() > 0) {
-                preferences.putString(("reg_" + String(i - 1)).c_str(), src.c_str());
+                prefs.putString(("reg_" + String(i - 1)).c_str(), src.c_str());
             }
         }
         numRecords = MAX_RECORDS - 1;
-        preferences.remove(("reg_" + String(numRecords)).c_str());
+        prefs.remove(("reg_" + String(numRecords)).c_str());
     }
     
-    // Chaves abreviadas para economizar espaço na NVS (limite de 64KB total)
+    // Chaves abreviadas para economizar espaço na NVS
     String record = "{\"t\":"   + String(temp, 1)     +
                     ",\"h\":"   + String(humidity, 1)  +
                     ",\"c2\":" + String(co2)           +
@@ -229,42 +249,62 @@ void FirebaseHandler::saveDataLocally(float temp, float humidity, int co2, int c
                     ",\"v\":"   + String(tvocs)         +
                     ",\"ts\":" + String(timestamp)     + "}";
 
-    preferences.putString(("reg_" + String(numRecords)).c_str(), record.c_str());
-    preferences.putInt("num_registros", numRecords + 1);
-    preferences.putULong("ultimo_timestamp", timestamp);
+    prefs.putString(("reg_" + String(numRecords)).c_str(), record.c_str());
+    prefs.putInt("num_registros", numRecords + 1);
+    prefs.putULong("ultimo_timestamp", timestamp);
     
-    preferences.end();
+    prefs.end();
     Serial.printf("[nvs] Registro %d salvo localmente (%d bytes)\n", numRecords, record.length());
 }
 
-
+// =============================================================================
+// =============================================================================
+// CORREÇÃO (v1.2.1): initializeNVS()
+//
+// Bug original: a chave "nvs_inicializada" tem 16 caracteres — um acima do
+// limite de 15 da NVS do ESP32. O nvs_set_i32 falha com KEY_TOO_LONG e a
+// ESP-IDF loga o erro, mas a função continuava sem gravar a flag. No boot
+// seguinte, prefs.getInt("nvs_inicializada", 0) retornava 0 novamente e o
+// bloco de "primeira execução" rodava indefinidamente.
+//
+// Correção: chave renomeada para "nvs_init" (8 chars), dentro do limite.
+//
+// Bug original 2: a função era chamada DEPOIS de setupSensorsAndActuators(),
+// mas loadSetpointsNVS() (dentro dela) tentava abrir o namespace antes de
+// initializeNVS() criá-lo, causando NOT_FOUND no primeiro boot.
+// Correção: initializeNVS() movido para ANTES de setupSensorsAndActuators()
+// no setup() do MainController.
+// =============================================================================
 bool FirebaseHandler::initializeNVS() {
     if (nvsInitialized) return true;
-    
-    if (!preferences.begin(NAMESPACE, true)) {
-        Serial.println("Failed to open NVS namespace");
+
+    Preferences prefs;
+
+    // Abre diretamente em modo escrita (false) para criar o namespace
+    // caso ainda não exista (situação comum após flash erase).
+    if (!prefs.begin(NAMESPACE, false)) {
+        // Falha rara — pode ocorrer se a partição NVS estiver corrompida.
+        // NÃO logamos com Serial.println aqui para evitar spam; o caller
+        // já trata o retorno false.
         return false;
     }
-    
-    size_t freeEntries = preferences.freeEntries();
-    Serial.println("Free space in NVS: " + String(freeEntries));
-    
-    if (preferences.getInt("nvs_inicializada", 0) == 0) {
-        Serial.println("NVS not initialized, setting default values...");
-        
-        preferences.end();
-        if (!preferences.begin(NAMESPACE, false)) {
-            Serial.println("Failed to open NVS for writing");
-            return false;
-        }
-        
-        preferences.putInt("num_registros", 0);
-        preferences.putInt("nvs_inicializada", 1);
-        
-        Serial.println("NVS initialized successfully");
+
+    // Verifica se já foi inicializada em algum boot anterior.
+    // CORREÇÃO (v1.2.1): chave renomeada de "nvs_inicializada" (16 chars, > limite de 15)
+    // para "nvs_init" (8 chars). A chave longa causava KEY_TOO_LONG silencioso no
+    // nvs_set_i32, então a flag nunca era gravada e o bloco de "primeira execução"
+    // rodava a cada boot sem nunca marcar como inicializado.
+    if (prefs.getInt("nvs_init", 0) == 0) {
+        Serial.println("[nvs] Flash apagada ou primeira execução — criando estrutura NVS");
+        prefs.putInt("num_registros", 0);
+        prefs.putInt("nvs_init",      1);
+        Serial.println("[nvs] Estrutura NVS criada com sucesso");
     }
-    
-    preferences.end();
+
+    size_t freeEntries = prefs.freeEntries();
+    Serial.printf("[nvs] Namespace '%s' pronto | entradas livres: %u\n", NAMESPACE, freeEntries);
+
+    prefs.end();
     nvsInitialized = true;
     return true;
 }
@@ -275,34 +315,32 @@ void FirebaseHandler::sendLocalData() {
         return;
     }
     
-    if (!preferences.begin(NAMESPACE, true)) {
+    Preferences prefs;
+    if (!prefs.begin(NAMESPACE, true)) {
         Serial.println("Failed to open Preferences for reading");
         return;
     }
     
-    int numRecords = preferences.getInt("num_registros", 0);
+    int numRecords = prefs.getInt("num_registros", 0);
     Serial.println("[nvs] Tentando enviar " + String(numRecords) + " registros locais");
-    preferences.end();
+    prefs.end();
 
     if (numRecords == 0) return;
 
-    if (!preferences.begin(NAMESPACE, false)) {
+    if (!prefs.begin(NAMESPACE, false)) {
         Serial.println("Failed to open Preferences for writing");
         return;
     }
     
     int sent = 0;
-    // CORREÇÃO: marca quais índices foram enviados para recompactação posterior.
-    // O loop anterior removia chaves inline enquanto iterava, o que causava saltos
-    // de índice e perda de registros quando havia corrompidos intercalados.
     bool sentFlags[MAX_RECORDS] = {};
 
     for (int i = 0; i < numRecords; i++) {
         String keyName = "reg_" + String(i);
-        String record  = preferences.getString(keyName.c_str(), "");
+        String record  = prefs.getString(keyName.c_str(), "");
 
         if (record.length() == 0) {
-            sentFlags[i] = true; // lacuna — descarta
+            sentFlags[i] = true;
             continue;
         }
 
@@ -310,7 +348,7 @@ void FirebaseHandler::sendLocalData() {
         DeserializationError err = deserializeJson(doc, record);
         if (err) {
             Serial.printf("[nvs] Registro %d corrompido, descartando: %s\n", i, err.c_str());
-            sentFlags[i] = true; // descarta corrompido
+            sentFlags[i] = true;
             continue;
         }
 
@@ -335,27 +373,24 @@ void FirebaseHandler::sendLocalData() {
         }
     }
     
-    // CORREÇÃO: recompacta removendo apenas os registros marcados como enviados/descartados.
-    // Garante que num_registros reflita exatamente os registros restantes válidos,
-    // mesmo que haja corrompidos ou lacunas no meio da sequência.
     int newIndex = 0;
     for (int i = 0; i < numRecords; i++) {
         if (sentFlags[i]) {
-            preferences.remove(("reg_" + String(i)).c_str());
+            prefs.remove(("reg_" + String(i)).c_str());
             continue;
         }
-        String record = preferences.getString(("reg_" + String(i)).c_str(), "");
+        String record = prefs.getString(("reg_" + String(i)).c_str(), "");
         if (record.length() > 0) {
             if (i != newIndex) {
-                preferences.putString(("reg_" + String(newIndex)).c_str(), record.c_str());
-                preferences.remove(("reg_" + String(i)).c_str());
+                prefs.putString(("reg_" + String(newIndex)).c_str(), record.c_str());
+                prefs.remove(("reg_" + String(i)).c_str());
             }
             newIndex++;
         }
     }
     
-    preferences.putInt("num_registros", newIndex);
-    preferences.end();
+    prefs.putInt("num_registros", newIndex);
+    prefs.end();
     
     Serial.printf("[nvs] Envio concluído: %d enviados, %d restantes.\n", sent, newIndex);
 }
@@ -382,14 +417,29 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
         Serial.println("[firebase] Dados dos sensores enviados com sucesso");
     } else {
         Serial.println("[firebase] ERRO - Falha ao enviar dados: " + fbdo.errorReason());
+        RLOG_FMT(LOG_ERROR, "[firebase]", "Falha ao enviar dados dos sensores: %s", fbdo.errorReason().c_str());
     }
-
-    // Histórico: único caminho em MainController::handleHistoryAndLocalData() → sendDataToHistory()
-    // (evita duplicata no RTDB; NVS/offline inalterados — saveDataLocal ainda via sendDataToHistory quando offline)
 }
 
 void FirebaseHandler::updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, bool ldrOk, bool waterOk) {
     if (!authenticated || !Firebase.ready()) return;
+
+    static bool lastDht   = true, lastCcs  = true;
+    static bool lastMq7   = false;
+    static bool lastWater = true;
+
+    if (!dhtOk  && lastDht)    RLOG_ERROR("[sensor]", "DHT22 INOPERANTE — temperatura/umidade indisponivel");
+    if (dhtOk   && !lastDht)   RLOG_INFO ("[sensor]", "DHT22 RECUPERADO — leituras normalizadas");
+    if (!ccsOk  && lastCcs)    RLOG_ERROR("[sensor]", "CCS811 INOPERANTE — CO2/TVOCs indisponivel");
+    if (ccsOk   && !lastCcs)   RLOG_INFO ("[sensor]", "CCS811 RECUPERADO — leituras normalizadas");
+    if (!waterOk && lastWater)  RLOG_WARN ("[sensor]", "Nivel de agua BAIXO — umidificador bloqueado");
+    if (waterOk  && !lastWater) RLOG_INFO ("[sensor]", "Nivel de agua OK — umidificador liberado");
+    if (mq7Ok   && !lastMq7)   RLOG_INFO ("[sensor]", "MQ-7 aquecido — leituras de CO disponiveis");
+
+    lastDht   = dhtOk;
+    lastCcs   = ccsOk;
+    lastMq7   = mq7Ok;
+    lastWater = waterOk;
 
     auto sensorErr = [](bool ok, const char* code) -> String {
         return ok ? "OK" : String(code);
@@ -406,36 +456,10 @@ void FirebaseHandler::updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, boo
     String path = "/greenhouses/" + greenhouseId;
     if (!Firebase.updateNode(fbdo, path.c_str(), json)) {
         Serial.println("[firebase] erro ao atualizar sensor_status: " + fbdo.errorReason());
+        RLOG_FMT(LOG_ERROR, "[firebase]", "Falha ao atualizar sensor_status: %s", fbdo.errorReason().c_str());
     }
 }
 
-// =============================================================================
-// CONTROLE DE PERMISSÕES — SUPORTE A MÚLTIPLAS ESTUFAS POR USUÁRIO
-// =============================================================================
-
-/**
- * @brief Verifica e concede permissão ao usuário para acessar a estufa
- *
- * @details A estrutura no Firebase usa um ARRAY JSON de IDs de estufas:
- *
- *   /Usuarios/<UID>/Estufas permitidas: ["IFUNGI-AA:BB:CC", "IFUNGI-DD:EE:FF"]
- *
- * Isso permite que um único usuário gerencie múltiplas estufas no app
- * sem sobrescrever as permissões existentes ao adicionar uma nova.
- *
- * MIGRAÇÃO AUTOMÁTICA: se o campo ainda estiver no formato antigo (string),
- * ele é migrado automaticamente para array na primeira chamada desta função.
- * Isso garante retrocompatibilidade com instalações anteriores.
- *
- * SEGURANÇA: esta função apenas verifica/adiciona permissão para a estufa
- * identificada pelo MAC address do próprio ESP32. Não é possível adicionar
- * permissão para outra estufa a partir deste código — o ID é gerado
- * deterministicamente a partir do hardware.
- *
- * @param userUID UID do usuário autenticado no Firebase
- * @param greenhouseID ID da estufa a verificar/adicionar
- * @return true se o usuário tem ou recebeu permissão
- */
 bool FirebaseHandler::checkUserPermission(const String& userUID, const String& greenhouseID) {
     if (!Firebase.ready()) {
         Serial.println("Firebase not ready.");
@@ -454,13 +478,10 @@ bool FirebaseHandler::checkUserPermission(const String& userUID, const String& g
         return Firebase.setString(fbdo, permissionsPath.c_str(), fallback);
     };
 
-    // ── Lê o campo atual de permissões ────────────────────────────────────────
     if (Firebase.get(fbdo, permissionsPath.c_str())) {
         String dataType = fbdo.dataType();
 
-        // ── Caso 1: campo é um ARRAY (formato atual) ──────────────────────────
         if (dataType == "json" || dataType == "array") {
-            // Verifica se a estufa já está no array
             if (Firebase.getArray(fbdo, permissionsPath.c_str())) {
                 FirebaseJsonArray* arr = fbdo.jsonArrayPtr();
                 FirebaseJsonData   item;
@@ -472,33 +493,27 @@ bool FirebaseHandler::checkUserPermission(const String& userUID, const String& g
                         return true;
                     }
                 }
-                // Estufa não encontrada — adiciona ao array existente
                 arr->add(greenhouseID);
                 if (writePermissionsArray(*arr)) {
                     Serial.println("Greenhouse added to existing permission list: " + greenhouseID);
                     return true;
                 }
             }
-        }
-
-        // ── Caso 2: campo é uma STRING (formato legado — migra para array) ────
-        else if (dataType == "string") {
+        } else if (dataType == "string") {
             String existing = fbdo.stringData();
             existing.trim();
             Serial.println("[permission] Formato antigo detectado, migrando para array...");
 
             FirebaseJsonArray newArray;
             if (existing.length() > 0) {
-                newArray.add(existing); // preserva a estufa já existente
+                newArray.add(existing);
             }
 
-            // Adiciona a estufa atual se não for duplicata
             bool alreadyIn = (existing == greenhouseID);
             if (!alreadyIn) {
                 newArray.add(greenhouseID);
             }
 
-            // Substitui a string pelo array no Firebase
             if (writePermissionsArray(newArray)) {
                 String arrayJson;
                 newArray.toString(arrayJson, false);
@@ -511,7 +526,6 @@ bool FirebaseHandler::checkUserPermission(const String& userUID, const String& g
         }
     }
 
-    // ── Campo não existe: cria o array com esta estufa ────────────────────────
     Serial.println("[permission] Criando permissão de acesso para: " + greenhouseID);
     FirebaseJsonArray newArray;
     newArray.add(greenhouseID);
@@ -520,7 +534,6 @@ bool FirebaseHandler::checkUserPermission(const String& userUID, const String& g
         return true;
     }
 
-    // Fallback: tenta criar o nó do usuário inteiro
     FirebaseJson userData;
     userData.set("Estufas permitidas/0", greenhouseID);
     if (Firebase.setJSON(fbdo, userPath.c_str(), userData)) {
@@ -578,7 +591,7 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     FirebaseJson sensorStatus;
     sensorStatus.set("dht22_sensorError", "OK");
     sensorStatus.set("ccs811_sensorError", "OK");
-    sensorStatus.set("mq07_sensorError", "SensorError03"); // warmup inicial
+    sensorStatus.set("mq07_sensorError", "SensorError03");
     sensorStatus.set("ldr_sensorError", "OK");
     sensorStatus.set("waterlevel_sensorError", "OK");
     sensorStatus.set("lastUpdate", (int)getCurrentTimestamp());
@@ -638,7 +651,6 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     status.set("ip", WiFi.localIP().toString());
     json.set("status", status);
 
-    // Nó OTA com campos iniciais — URL preenchida externamente pelo desenvolvedor
     FirebaseJson otaNode;
     otaNode.set("available", false);
     otaNode.set("version",   "");
@@ -649,9 +661,6 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     String path = "/greenhouses/" + greenhouseId;
     if (Firebase.setJSON(fbdo, path.c_str(), json)) {
         Serial.println("[firebase] Greenhouse created successfully with complete structure");
-        // CORREÇÃO: checkUserPermission chamado apenas aqui, não duplicado em verifyGreenhouse.
-        // O fluxo correto é: authenticate() → verifyGreenhouse() → createInitialGreenhouse()
-        // → checkUserPermission(). Chamar antes de criar causava race condition.
         checkUserPermission(userUID, greenhouseId);
     } else {
         Serial.print("[firebase] Error creating greenhouse: ");
@@ -700,16 +709,8 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
     if (Firebase.get(fbdo, path.c_str())) {
         if (fbdo.dataType() != "null") {
             Serial.println("Greenhouse found. Checking structure...");
-            
-            // CORREÇÃO: isGreenhouseStructureComplete() já chama updateNode() internamente
-            // para adicionar campos faltantes. Se retornar false, a estufa está tão
-            // corrompida que precisa ser recriada — mas NÃO chamamos createInitialGreenhouse()
-            // aqui para evitar sobrescrever dados do usuário desnecessariamente.
-            // A função repair já cobre campos individuais faltantes.
             if (!isGreenhouseStructureComplete(greenhouseId)) {
                 Serial.println("Greenhouse structure incomplete after repair attempt.");
-                // Tenta recriar apenas se a estrutura está completamente inválida
-                // (isGreenhouseStructureComplete() já tentou reparar — se falhou é crítico)
                 createInitialGreenhouse(userUID, userUID);
             } else {
                 Serial.println("Greenhouse structure is complete.");
@@ -718,7 +719,6 @@ bool FirebaseHandler::greenhouseExists(const String& greenhouseId) {
         }
     }
     
-    // Estufa não existe — createInitialGreenhouse será chamada pelo caller (verifyGreenhouse)
     Serial.println("Greenhouse not found.");
     return false;
 }
@@ -730,7 +730,6 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
 
     String path = "/greenhouses/" + greenhouseId;
     
-    // Lista de campos obrigatórios
     const char* requiredFields[] = {
         "atuadores",
         "atuadores/leds",
@@ -886,7 +885,6 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         }
     };
 
-    // Verifica campos obrigatórios
     for (int i = 0; i < numFields; i++) {
         if (!jsonPtr->get(result, requiredFields[i]) ||
             result.typeNum == FirebaseJson::JSON_NULL) {
@@ -897,7 +895,6 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         }
     }
 
-    // Verifica e cria campos opcionais de debug/dev
     if (!jsonPtr->get(result, "debug_mode")) {
         updateJson.set("debug_mode", false);
         needsUpdate = true;
@@ -951,10 +948,10 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         Serial.println("[repair] Repairing greenhouse structure...");
         if (Firebase.updateNode(fbdo, path.c_str(), updateJson)) {
             Serial.println("[repair] Greenhouse structure repaired successfully");
-            return true; // reparou com sucesso
+            return true;
         } else {
             Serial.println("[repair] Failed to repair: " + fbdo.errorReason());
-            return false; // falha no repair → caller decide se recria
+            return false;
         }
     }
     
@@ -963,22 +960,30 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
 }
 
 bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
-    Preferences preferences;
-    if(!preferences.begin("firebase-creds", true)) {
-        Serial.println("[error] Failed to open preferences");
+    Preferences prefs;
+    // CORREÇÃO (v1.2.1): abrimos em modo escrita (false) em vez de read-only (true).
+    //
+    // Com mode=true, se o namespace "firebase-creds" ainda não existir (flash nova
+    // ou apagada), o ESP-IDF loga [E][Preferences.cpp:50] nvs_open failed: NOT_FOUND
+    // a cada 30 s (intervalo de reconexão), poluindo o serial e enganando a análise.
+    //
+    // Com mode=false, o namespace é criado silenciosamente se ausente. As chaves
+    // "email" e "password" simplesmente retornam "" (getString default), e a função
+    // retorna false sem nenhum erro de log — comportamento correto para "sem credenciais".
+    if (!prefs.begin("firebase-creds", false)) {
+        // Falha real (partição NVS corrompida) — rara, mas tratada.
         return false;
     }
-    
-    email = preferences.getString("email", "");
-    password = preferences.getString("password", "");
-    preferences.end();
-    
-    if(email.isEmpty() || password.isEmpty()) {
-        Serial.println("No Firebase credentials found");
-        return false;
+
+    email    = prefs.getString("email",    "");
+    password = prefs.getString("password", "");
+    prefs.end();
+
+    if (email.isEmpty() || password.isEmpty()) {
+        return false;   // sem credenciais — situação normal após flash erase
     }
-    
-    Serial.println("Firebase credentials loaded from NVS");
+
+    Serial.println("[firebase] Credenciais carregadas da NVS");
     return true;
 }
 
@@ -1018,10 +1023,6 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         return;
     }
 
-    // Snapshot local de setpoints aplicados para evitar regressao por payload parcial.
-    // Regra de seguranca:
-    // - Antes de ter baseline completo (8 campos), ignoramos payload parcial.
-    // - Depois do baseline, payload parcial atualiza apenas os campos presentes.
     static bool baselineReady = false;
     static int   currentLux = 5000, currentCoSp = 50, currentCo2Sp = 400, currentTvocsSp = 100;
     static float currentTMax = 30.0f, currentTMin = 20.0f, currentUMax = 80.0f, currentUMin = 60.0f;
@@ -1059,11 +1060,9 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
     if (fabsf(currentUMin - prevUMin) > 0.01f)        changed = true;
 
     if (!changed) {
-        // Firebase tem os mesmos valores — não chama applySetpoints, não grava NVS
         return;
     }
 
-    // Valores mudaram: aplica e atualiza o cache
     Serial.printf("[setpoints] Alterados (%d/8 campos lidos): "
                   "Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n",
                   fieldsRead, currentLux, currentTMin, currentTMax, currentUMin, currentUMax,
@@ -1114,8 +1113,8 @@ void FirebaseHandler::getManualActuatorStates(bool& relay1, bool& relay2, bool& 
     }
 }
 
-void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWrite, int& pin, bool& pwm, int& pwmValue) {
-    analogRead = false; digitalWrite = false; pin = -1; pwm = false; pwmValue = 0;
+void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWriteMode, int& pin, bool& pwm, int& pwmValue) {
+    analogRead = false; digitalWriteMode = false; pin = -1; pwm = false; pwmValue = 0;
     
     if (!authenticated || !Firebase.ready()) {
         return;
@@ -1127,7 +1126,7 @@ void FirebaseHandler::getDevModeSettings(bool& analogRead, bool& digitalWrite, i
         FirebaseJsonData result;
 
         if (json->get(result, "analogRead")) analogRead = result.boolValue;
-        if (json->get(result, "boolean")) digitalWrite = result.boolValue;
+        if (json->get(result, "boolean")) digitalWriteMode = result.boolValue;
         if (json->get(result, "pin")) pin = result.intValue;
         if (json->get(result, "pwm")) pwm = result.boolValue;
         if (json->get(result, "pwmValue")) pwmValue = result.intValue;
@@ -1170,7 +1169,7 @@ void FirebaseHandler::ensureOTANodeExists() {
 
     String path = "/greenhouses/" + greenhouseId + "/ota/available";
     if (Firebase.getBool(fbdo, path.c_str())) {
-        return; // Nó já existe
+        return;
     }
 
     Serial.println("[ota] Nó OTA não encontrado, criando estrutura...");
@@ -1424,4 +1423,27 @@ void FirebaseHandler::repairMissingFields() {
     } else {
         Serial.println("[repair] Estrutura do banco integra");
     }
+}
+
+// =============================================================================
+// LOGGER REMOTO
+// =============================================================================
+
+extern "C" unsigned long _rlog_getTimestamp() {
+    extern FirebaseHandler firebase;
+    return firebase.getCurrentTimestamp();
+}
+
+void FirebaseHandler::initLogger(LogLevel minLevel) {
+    if (!authenticated || greenhouseId.isEmpty()) {
+        Serial.println("[rlog] initLogger chamado antes de autenticar — ignorado");
+        return;
+    }
+    RemoteLogger::init(&fbdo, greenhouseId, minLevel);
+    ensureLogNodeExists();
+    RLOG_INFO("[system]", "Logger remoto inicializado");
+}
+
+void FirebaseHandler::ensureLogNodeExists() {
+    RemoteLogger::ensureNodeExists();
 }
