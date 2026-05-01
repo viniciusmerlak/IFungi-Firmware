@@ -22,13 +22,11 @@ Variaveis de ambiente aceitas (alternativa aos args):
 """
 
 import argparse
-import json
 import math
 import os
 import random
 import signal
 import sys
-import threading
 import time
 from datetime import datetime, timezone
 
@@ -170,7 +168,7 @@ class SensorSimulator:
         self.co = min(sp["coSp"], 10)
         self.tvocs = min(sp["tvocsSp"], 50)
         self.luminosity = sp["lux"] // 2
-        self.water_level = True  # True = nivel OK (firmware: HIGH = tem agua)
+        self.water_level = False  # True = nivel BAIXO (firmware: HIGH > threshold = seco)
 
         # Saude dos sensores
         self.dht_ok = True
@@ -215,7 +213,8 @@ class SensorSimulator:
         self.tvocs = max(TVOCS_RANGE[0], min(TVOCS_RANGE[1], self.tvocs))
 
         # Luminosidade varia com "hora do dia" (ciclo sinusoidal de 24h)
-        hour = datetime.now().hour + datetime.now().minute / 60.0
+        now_dt = datetime.now()
+        hour = now_dt.hour + now_dt.minute / 60.0
         day_factor = max(0, math.sin((hour - 6) * math.pi / 12))
         self.luminosity = int(sp["lux"] * day_factor * random.uniform(0.85, 1.15))
         self.luminosity = max(LUX_RANGE[0], min(LUX_RANGE[1], self.luminosity))
@@ -234,7 +233,7 @@ class SensorSimulator:
         # Nivel de agua muda raramente
         if random.random() < 0.005:
             self.water_level = not self.water_level
-        self.water_ok = self.water_level
+        self.water_ok = not self.water_level  # water_ok = True quando nao esta baixo
 
     def get_readings(self):
         return {
@@ -527,6 +526,8 @@ class GreenhouseSimulator:
                 self.led_schedule.update(existing["led_schedule"])
             if "operation_mode" in existing:
                 self.operation_mode.update(existing["operation_mode"])
+            # Re-apply scenario overrides so they aren't lost
+            self._apply_scenario()
         else:
             print(f"[sim] Criando estufa {self.gh_id}")
             self.fb.put(path, structure)
@@ -781,7 +782,7 @@ class GreenhouseSimulator:
                 "DHT22 INOPERANTE — temperatura/umidade indisponivel",
             )
 
-        if not self.sensors.water_level:
+        if self.sensors.water_level:
             self.logger.log(
                 "WARN", "[sensor]",
                 "Nivel de agua BAIXO — umidificador bloqueado",
