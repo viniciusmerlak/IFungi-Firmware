@@ -1,9 +1,9 @@
 /**
  * @file QRCodeGenerator.cpp
  * @brief Implementação do gerador de QR Code para identificação da estufa
- * @author Seu Nome
+ * @author Vinicius Merlak
  * @date 2024
- * @version 1.1
+ * @version 1.3.0
  * 
  * @details Este arquivo implementa a geração de QR Codes para identificação
  * única da estufa, permitindo acesso rápido via dispositivos móveis.
@@ -15,7 +15,7 @@
 #include <Arduino.h>
 
 /**
- * @brief Gera e exvia um QR Code contendo o ID da estufa
+ * @brief Gera e exibe um QR Code contendo o ID da estufa
  * 
  * @param id String contendo o ID único da estufa a ser codificado
  * 

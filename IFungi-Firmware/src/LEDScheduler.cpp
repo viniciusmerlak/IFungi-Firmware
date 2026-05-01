@@ -1,7 +1,7 @@
 /**
  * @file LEDScheduler.cpp
  * @brief Implementação do agendador e simulador solar de LEDs
- * @version 1.0
+ * @version 1.3.0
  * @date 2026
  */
 

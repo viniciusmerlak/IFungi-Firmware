@@ -52,7 +52,7 @@ private:
     unsigned long mq7WarmupUntil = 0;
 
     /// Tensão no divisor do módulo (tip. 5 V no elemento MQ-7; ajuste se sua PCB for 3,3 V).
-    static constexpr float MQ7_VC_VOLTS   = 5.0f;
+    static constexpr float MQ7_VC_VOLTS   = 3.3f;
     /// Resistência de carga do módulo em kΩ (tip. 10 k na placa YK/MQ).
     static constexpr float MQ7_RL_KOHM    = 10.0f;
     /// R0 em kΩ no ar “limpo” — calibre com medição de referência se necessário.

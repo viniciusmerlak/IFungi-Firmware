@@ -1,7 +1,7 @@
 /**
  * @file RemoteLogger.cpp
  * @brief Implementação do logger remoto para Firebase RTDB
- * @version 1.0
+ * @version 1.3.0
  * @date 2026
  */
 

@@ -1,7 +1,7 @@
 /**
  * @file MainController.cpp
  * @brief Controlador principal do sistema IFungi Greenhouse
- * @version 1.2.2
+ * @version 1.3.0
  * @date 2026
  *
  * CORREÇÕES (v1.2.2):
@@ -63,7 +63,7 @@ ActuatorController actuators;
 QRCodeGenerator    qrGenerator;
 OTAHandler         otaHandler;
 
-const String FIRMWARE_VERSION = "1.2.2";
+const String FIRMWARE_VERSION = "1.3.0";
 
 String greenhouseID;
 

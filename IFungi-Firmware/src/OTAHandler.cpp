@@ -1,7 +1,7 @@
 /**
  * @file OTAHandler.cpp
  * @brief Implementação do controlador OTA para o sistema IFungi Greenhouse
- * @version 1.1
+ * @version 1.3.0
  * @date 2026
  *
  * @details Fluxo completo de atualização:

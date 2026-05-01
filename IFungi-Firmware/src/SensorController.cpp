@@ -1,7 +1,7 @@
 /**
  * @file SensorController.cpp
  * @brief Controlador de sensores ambientais (DHT22, CCS811, LDR, MQ-7, nível de água)
- * @version 1.2.0
+ * @version 1.3.0
  * @date 2026
  *
  * CORREÇÕES (v1.2.0):
