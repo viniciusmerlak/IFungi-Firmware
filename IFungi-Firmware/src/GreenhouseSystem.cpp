@@ -145,11 +145,12 @@ bool FirebaseHandler::sendDataToHistory(float temp, float humidity, int co2, int
         saveDataLocally(temp, humidity, co2, co, lux, tvocs, timestamp);
         return false;
     }
-
-    // Sanitiza NAN antes de serializar — mesma lógica de sendSensorData
-    if (isnan(temp))     temp     = -999.0f;
-    if (isnan(humidity)) humidity = -999.0f;
-
+    if (isnan(temp) || isnan(humidity)) {
+        Serial.println("[Error] ERRO - Dados inválidos (temp ou humidity)");
+        temp = -999; // Valor inválido claro para temperatura aceito pelo json (NAN causaria falha de parsing)
+        humidity = -999; // Valor inválido claro para umidade (100.0f manteria umidificador desligado, mas -999 destaca que é um erro de leitura)
+        
+    }
     String tsStr = String(getCurrentTimestamp());
     String path = "/historico/" + greenhouseId + "/" + tsStr;
     
@@ -407,41 +408,20 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
     }
 
     String basePath = "/greenhouses/" + greenhouseId;
-
-    // CORREÇÃO: NAN não é um valor JSON válido — a biblioteca FirebaseESP32
-    // serializa NAN como "NaN" (string), corrompendo o nó de sensores no RTDB
-    // e quebrando o parsing no app mobile. Quando o DHT22 está inoperante,
-    // getTemperature() retorna NAN (fail-safe v1.2). Aqui substituímos por
-    // null usando FirebaseJson::set(key) sem valor — o RTDB aceita null e o
-    // app pode distinguir "sem dado" de "zero válido".
-    // humidity=100.0f é o fail-safe do SensorController — não é NAN, mas
-    // também enviamos null para sinalizar dado inválido ao app.
-    bool tempValid = !isnan(temp);
-    bool humValid  = !isnan(humidity) && humidity < 100.0f + 0.1f && tempValid;
-    // (humidity=100.0f é o valor de fail-safe quando dhtOK=false; tempValid=false
-    //  já cobre esse caso, mas checamos explicitamente para clareza)
-
+    
+    // Enviar sensores em objeto aninhado
     FirebaseJson sensores;
-    if (tempValid) {
-        sensores.set("temperatura", temp);
-    } else {
-        sensores.set("temperatura", "N/A");  // valor sentinela — app trata como offline
-        Serial.println("[firebase] WARN: temperatura NAN — enviando N/A ao Firebase");
-    }
-    if (humValid) {
-        sensores.set("umidade", humidity);
-    } else {
-        sensores.set("umidade", "N/A");
-    }
-    sensores.set("co2",          co2);
-    sensores.set("co",           co);
-    sensores.set("tvocs",        tvocs);
+    sensores.set("temperatura", temp);
+    sensores.set("umidade", humidity);
+    sensores.set("co2", co2);
+    sensores.set("co", co);
+    sensores.set("tvocs", tvocs);
     sensores.set("luminosidade", lux);
 
     FirebaseJson json;
-    json.set("sensores",     sensores);
-    json.set("lastUpdate",   (int)getCurrentTimestamp());
-    json.set("niveis/agua",  waterLevel);
+    json.set("sensores", sensores);
+    json.set("lastUpdate", (int)getCurrentTimestamp());
+    json.set("niveis/agua", waterLevel);
 
     if (Firebase.updateNode(fbdo, basePath.c_str(), json)) {
         Serial.println("[firebase] Dados dos sensores enviados com sucesso");
@@ -593,142 +573,119 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
         }
     }
 
-    // CORREÇÃO: em vez de alocar 9+ FirebaseJson simultaneamente na stack
-    // (causava Stack Canary Overflow na loopTask), enviamos cada sub-nó em
-    // chamadas updateNode/setJSON separadas. Cada bloco usa apenas 1-2 objetos
-    // FirebaseJson por vez, reduzindo o pico de stack de ~4KB para ~400 bytes.
+    FirebaseJson json;
+    
+    FirebaseJson actuators;
+    actuators.set("leds/ligado", false);
+    actuators.set("leds/watts", 0);
+    actuators.set("rele1", false);
+    actuators.set("rele2", false);
+    actuators.set("rele3", false);
+    actuators.set("rele4", false);
+    actuators.set("umidificador", false);
+    json.set("atuadores", actuators);
 
-    String base = "/greenhouses/" + greenhouseId;
+    json.set("createdBy", creatorUser);
+    json.set("currentUser", currentUser);
+    json.set("lastUpdate", (int)getCurrentTimestamp());
 
-    // ── 1. Metadados básicos ──────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("createdBy",   creatorUser);
-        j.set("currentUser", currentUser);
-        j.set("lastUpdate",  (int)getCurrentTimestamp());
-        j.set("debug_mode",  false);
-        j.set("niveis/agua", false);
-        Firebase.updateNode(fbdo, base.c_str(), j);
+    FirebaseJson sensors;
+    sensors.set("tvocs", 0);
+    sensors.set("co", 0);
+    sensors.set("co2", 0);
+    sensors.set("luminosidade", 0);
+    sensors.set("temperatura", 0);
+    sensors.set("umidade", 0);
+    json.set("sensores", sensors);
+
+    FirebaseJson sensorStatus;
+    sensorStatus.set("dht22_sensorError", "OK");
+    sensorStatus.set("ccs811_sensorError", "OK");
+    sensorStatus.set("mq07_sensorError", "SensorError03");
+    sensorStatus.set("ldr_sensorError", "OK");
+    sensorStatus.set("waterlevel_sensorError", "OK");
+    sensorStatus.set("lastUpdate", (int)getCurrentTimestamp());
+    json.set("sensor_status", sensorStatus);
+
+    FirebaseJson setpoints;
+    setpoints.set("lux", 5000);
+    setpoints.set("tMax", 30.0);
+    setpoints.set("tMin", 20.0);
+    setpoints.set("uMax", 80.0);
+    setpoints.set("uMin", 60.0);
+    setpoints.set("coSp", 50);
+    setpoints.set("co2Sp", 400);
+    setpoints.set("tvocsSp", 100);
+    json.set("setpoints", setpoints);
+
+    json.set("niveis/agua", false);
+    json.set("debug_mode", false);
+
+    FirebaseJson manualActuators;
+    manualActuators.set("rele1", false);
+    manualActuators.set("rele2", false);
+    manualActuators.set("rele3", false);
+    manualActuators.set("rele4", false);
+    manualActuators.set("leds/ligado", false);
+    manualActuators.set("leds/intensity", 0);
+    manualActuators.set("umidificador", false);
+    json.set("manual_actuators", manualActuators);
+
+    FirebaseJson devmode;
+    devmode.set("analogRead", false);
+    devmode.set("boolean", false);
+    devmode.set("pin", -1);
+    devmode.set("pwm", false);
+    devmode.set("pwmValue", 0);
+    json.set("devmode", devmode);
+
+    FirebaseJson ledSched;
+    ledSched.set("scheduleEnabled", false);
+    ledSched.set("solarSimEnabled", false);
+    ledSched.set("onHour",    6);
+    ledSched.set("onMinute",  0);
+    ledSched.set("offHour",  20);
+    ledSched.set("offMinute", 0);
+    ledSched.set("intensity", 255);
+    json.set("led_schedule", ledSched);
+
+    FirebaseJson opMode;
+    opMode.set("mode",        "manual");
+    opMode.set("lastChanged", (int)getCurrentTimestamp());
+    opMode.set("changedBy",   "esp32");
+    json.set("operation_mode", opMode);
+
+    FirebaseJson status;
+    status.set("online", true);
+    status.set("lastHeartbeat", (int)getCurrentTimestamp());
+    status.set("ip", WiFi.localIP().toString());
+    json.set("status", status);
+
+    FirebaseJson otaNode;
+    otaNode.set("available", false);
+    otaNode.set("version",   "");
+    otaNode.set("url",       "");
+    otaNode.set("notes",     "Insira a URL HTTPS do .bin e mude available para true");
+    json.set("ota", otaNode);
+
+    String path = "/greenhouses/" + greenhouseId;
+    if (Firebase.setJSON(fbdo, path.c_str(), json)) {
+        Serial.println("[firebase] Greenhouse created successfully with complete structure");
+        checkUserPermission(userUID, greenhouseId);
+    } else {
+        Serial.print("[firebase] Error creating greenhouse: ");
+        Serial.println(fbdo.errorReason());
+        
+        if (fbdo.errorReason().indexOf("token") >= 0) {
+            Serial.println("[firebase] Invalid token, trying to renew...");
+            Firebase.refreshToken(&config);
+            delay(1000);
+            if (Firebase.ready() && Firebase.setJSON(fbdo, path.c_str(), json)) {
+                Serial.println("[firebase] Greenhouse created after renewing token");
+                checkUserPermission(userUID, greenhouseId);
+            }
+        }
     }
-
-    // ── 2. Atuadores ─────────────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("leds/ligado",  false);
-        j.set("leds/watts",   0);
-        j.set("rele1",        false);
-        j.set("rele2",        false);
-        j.set("rele3",        false);
-        j.set("rele4",        false);
-        j.set("umidificador", false);
-        Firebase.setJSON(fbdo, (base + "/atuadores").c_str(), j);
-    }
-
-    // ── 3. Sensores ───────────────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("temperatura",  0.0f);
-        j.set("umidade",      0.0f);
-        j.set("co2",          0);
-        j.set("co",           0);
-        j.set("tvocs",        0);
-        j.set("luminosidade", 0);
-        Firebase.setJSON(fbdo, (base + "/sensores").c_str(), j);
-    }
-
-    // ── 4. Status dos sensores ────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("dht22_sensorError",      "OK");
-        j.set("ccs811_sensorError",     "OK");
-        j.set("mq07_sensorError",       "SensorError03"); // warmup inicial
-        j.set("ldr_sensorError",        "OK");
-        j.set("waterlevel_sensorError", "OK");
-        j.set("lastUpdate",             (int)getCurrentTimestamp());
-        Firebase.setJSON(fbdo, (base + "/sensor_status").c_str(), j);
-    }
-
-    // ── 5. Setpoints ─────────────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("lux",     5000);
-        j.set("tMax",    30.0f);
-        j.set("tMin",    20.0f);
-        j.set("uMax",    80.0f);
-        j.set("uMin",    60.0f);
-        j.set("coSp",    50);
-        j.set("co2Sp",   400);
-        j.set("tvocsSp", 100);
-        Firebase.setJSON(fbdo, (base + "/setpoints").c_str(), j);
-    }
-
-    // ── 6. Atuadores manuais ──────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("rele1",        false);
-        j.set("rele2",        false);
-        j.set("rele3",        false);
-        j.set("rele4",        false);
-        j.set("leds/ligado",  false);
-        j.set("leds/intensity", 0);
-        j.set("umidificador", false);
-        Firebase.setJSON(fbdo, (base + "/manual_actuators").c_str(), j);
-    }
-
-    // ── 7. Dev mode ───────────────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("analogRead",  false);
-        j.set("boolean",     false);
-        j.set("pin",         -1);
-        j.set("pwm",         false);
-        j.set("pwmValue",    0);
-        Firebase.setJSON(fbdo, (base + "/devmode").c_str(), j);
-    }
-
-    // ── 8. Agendador de LEDs ──────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("scheduleEnabled", false);
-        j.set("solarSimEnabled", false);
-        j.set("onHour",    6);
-        j.set("onMinute",  0);
-        j.set("offHour",  20);
-        j.set("offMinute", 0);
-        j.set("intensity", 255);
-        Firebase.setJSON(fbdo, (base + "/led_schedule").c_str(), j);
-    }
-
-    // ── 9. Modo de operação ───────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("mode",        "manual");
-        j.set("lastChanged", (int)getCurrentTimestamp());
-        j.set("changedBy",   "esp32");
-        Firebase.setJSON(fbdo, (base + "/operation_mode").c_str(), j);
-    }
-
-    // ── 10. Status online ─────────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("online",        true);
-        j.set("lastHeartbeat", (int)getCurrentTimestamp());
-        j.set("ip",            WiFi.localIP().toString());
-        Firebase.setJSON(fbdo, (base + "/status").c_str(), j);
-    }
-
-    // ── 11. Nó OTA ───────────────────────────────────────────────────────────
-    {
-        FirebaseJson j;
-        j.set("available", false);
-        j.set("version",   "");
-        j.set("url",       "");
-        j.set("notes",     "Insira a URL HTTPS do .bin e mude available para true");
-        Firebase.setJSON(fbdo, (base + "/ota").c_str(), j);
-    }
-
-    Serial.println("[firebase] Greenhouse criado com sucesso (estrutura completa)");
-    checkUserPermission(userUID, greenhouseId);
 }
 
 void FirebaseHandler::sendHeartbeat() {
@@ -806,15 +763,7 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         "sensor_status/mq07_sensorError",
         "sensor_status/ldr_sensorError",
         "sensor_status/waterlevel_sensorError",
-        "setpoints",
-        "setpoints/lux",
-        "setpoints/tMax",
-        "setpoints/tMin",
-        "setpoints/uMax",
-        "setpoints/uMin",
-        "setpoints/coSp",
-        "setpoints/co2Sp",
-        "setpoints/tvocsSp",
+        // setpoints REMOVIDOS: são dados do usuário, nunca reparados com defaults
         "niveis/agua",
         "createdBy",
         "currentUser",
@@ -883,20 +832,7 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
                    field == "sensor_status/ldr_sensorError" || field == "sensor_status/waterlevel_sensorError") {
             updateJson.set(field, "OK");
         } else if (field == "sensor_status/mq07_sensorError") updateJson.set(field, "SensorError03");
-        else if (field == "setpoints") {
-            FirebaseJson sp;
-            sp.set("lux", 5000); sp.set("tMax", 30.0f); sp.set("tMin", 20.0f);
-            sp.set("uMax", 80.0f); sp.set("uMin", 60.0f);
-            sp.set("coSp", 50); sp.set("co2Sp", 400); sp.set("tvocsSp", 100);
-            updateJson.set("setpoints", sp);
-        } else if (field == "setpoints/lux") updateJson.set(field, 5000);
-        else if (field == "setpoints/tMax") updateJson.set(field, 30.0f);
-        else if (field == "setpoints/tMin") updateJson.set(field, 20.0f);
-        else if (field == "setpoints/uMax") updateJson.set(field, 80.0f);
-        else if (field == "setpoints/uMin") updateJson.set(field, 60.0f);
-        else if (field == "setpoints/coSp") updateJson.set(field, 50);
-        else if (field == "setpoints/co2Sp") updateJson.set(field, 400);
-        else if (field == "setpoints/tvocsSp") updateJson.set(field, 100);
+        // setpoints removidos — nunca reparados com defaults do firmware
         else if (field == "niveis/agua") updateJson.set(field, false);
         else if (field == "createdBy" || field == "currentUser") updateJson.set(field, userUID);
         else if (field == "lastUpdate") updateJson.set(field, (int)getCurrentTimestamp());
@@ -1371,24 +1307,32 @@ void FirebaseHandler::repairMissingFields() {
         return;
     }
 
-    struct { const char* key; float defVal; bool isFloat; } spFields[] = {
-        {"setpoints/lux",     5000, false},
-        {"setpoints/tMax",    30.0, true },
-        {"setpoints/tMin",    20.0, true },
-        {"setpoints/uMax",    80.0, true },
-        {"setpoints/uMin",    60.0, true },
-        {"setpoints/coSp",   50,    false},
-        {"setpoints/co2Sp",  400,   false},
-        {"setpoints/tvocsSp",100,   false},
-    };
-    for (auto& f : spFields) {
-        if (!Firebase.get(fbdo, (base + "/" + f.key).c_str()) ||
-            fbdo.dataType() == "null") {
-            if (f.isFloat) patch.set(f.key, f.defVal);
-            else            patch.set(f.key, (int)f.defVal);
-            dirty = true;
-            Serial.printf("[repair] WARN: Campo ausente: %s\n", f.key);
-        }
+    // SETPOINTS — verificação do nó inteiro, NUNCA campo por campo.
+    //
+    // POR QUE campo-por-campo estava quebrando:
+    //   Firebase.get(fbdo, "setpoints/tMax") usa o mesmo objeto fbdo que todas
+    //   as outras operações. Se qualquer get() anterior falhou (timeout, resposta
+    //   parcial, SSL reset), o fbdo fica em estado de erro e os gets seguintes
+    //   retornam false / dataType=="null" — mesmo que o campo exista no banco.
+    //   Isso fazia o repair sobrescrever tMax=23 (usuário) com tMax=30 (default)
+    //   a cada ciclo de 5 minutos que sofresse qualquer instabilidade de rede.
+    //
+    // CORREÇÃO: uma única leitura do nó pai /setpoints. Se existir com algum dado
+    //   → pertence ao usuário, não toca. Só cria se o nó inteiro estiver ausente.
+    if (!Firebase.get(fbdo, (base + "/setpoints").c_str()) ||
+        fbdo.dataType() == "null") {
+        FirebaseJson sp;
+        sp.set("lux",     5000);
+        sp.set("tMax",    30.0f);
+        sp.set("tMin",    20.0f);
+        sp.set("uMax",    80.0f);
+        sp.set("uMin",    60.0f);
+        sp.set("coSp",    50);
+        sp.set("co2Sp",   400);
+        sp.set("tvocsSp", 100);
+        patch.set("setpoints", sp);
+        dirty = true;
+        Serial.println("[repair] WARN: No /setpoints ausente — criando com defaults");
     }
 
     if (!Firebase.get(fbdo, (base + "/led_schedule").c_str()) ||
