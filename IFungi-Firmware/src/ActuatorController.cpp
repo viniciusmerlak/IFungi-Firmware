@@ -108,22 +108,32 @@ void ActuatorController::saveSetpointsNVS() {
 bool ActuatorController::loadSetpointsNVS() {
     Preferences preferences;
     if(!preferences.begin("setpoints", true)) {
+        // Namespace não existe ainda — normal no primeiro boot ou após flash erase.
+        // NÃO logamos o erro do ESP-IDF (NOT_FOUND) para evitar spam.
         Serial.println("[nvs] Setpoints NVS not found, using defaults");
         return false;
     }
 
+    // BUG CORRIGIDO v1.2.1: o fallback de "lux" era 100 (valor absurdo para lux
+    // de estufa — era um valor de teste esquecido). Corrigido para 5000, que é o
+    // mesmo default usado em applySetpoints() e createInitialGreenhouse().
+    // Se a chave existia mas estava corrompida, getInt("lux", 100) retornava 100,
+    // que era salvo na NVS e depois propagado ao Firebase como setpoint "válido",
+    // sobrescrevendo o valor configurado pelo usuário.
     if(preferences.isKey("lux")) {
-        luxSetpoint   = preferences.getInt("lux", 100);
-        tempMin       = preferences.getFloat("tMin", 20.0);
-        tempMax       = preferences.getFloat("tMax", 30.0);
-        humidityMin   = preferences.getFloat("uMin", 60.0);
-        humidityMax   = preferences.getFloat("uMax", 80.0);
-        coSetpoint    = preferences.getInt("coSp", 50);
-        co2Setpoint   = preferences.getInt("co2Sp", 400);
+        luxSetpoint   = preferences.getInt("lux",    5000);  // ← era 100 (BUG)
+        tempMin       = preferences.getFloat("tMin",  20.0f);
+        tempMax       = preferences.getFloat("tMax",  30.0f);
+        humidityMin   = preferences.getFloat("uMin",  60.0f);
+        humidityMax   = preferences.getFloat("uMax",  80.0f);
+        coSetpoint    = preferences.getInt("coSp",    50);
+        co2Setpoint   = preferences.getInt("co2Sp",  400);
         tvocsSetpoint = preferences.getInt("tvocsSp", 100);
 
         preferences.end();
-        Serial.println("[nvs] Setpoints loaded from NVS");
+        Serial.printf("[nvs] Setpoints carregados da NVS: Lux=%d, T=[%.1f-%.1f], H=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n",
+                      luxSetpoint, tempMin, tempMax, humidityMin, humidityMax,
+                      coSetpoint, co2Setpoint, tvocsSetpoint);
         return true;
     } else {
         preferences.end();
@@ -207,7 +217,8 @@ void ActuatorController::setFirebaseHandler(FirebaseHandler* handler) {
 
 void ActuatorController::applySetpoints(int lux, float tMin, float tMax,
                                         float uMin, float uMax,
-                                        int coSp, int co2Sp, int tvocsSp) {
+                                        int coSp, int co2Sp, int tvocsSp,
+                                        bool persistToNVS) {
     bool changed = false;
 
     if (lux     != luxSetpoint)                   changed = true;
@@ -230,10 +241,19 @@ void ActuatorController::applySetpoints(int lux, float tMin, float tMax,
     co2Setpoint   = co2Sp;
     tvocsSetpoint = tvocsSp;
 
-    saveSetpointsNVS();
+    // BUG CORRIGIDO v1.2.1: persistToNVS=false quando chamado com defaults do
+    // firmware (no setup, caso loadSetpointsNVS falhe). Gravar defaults na NVS
+    // mascara os valores do usuário: na 1ª leitura do Firebase os statics de
+    // receiveSetpoints() igualam os defaults → changed=false → Firebase ignorado.
+    // Somente persiste quando os valores vêm do Firebase (receiveSetpoints) ou
+    // de ação explícita do usuário.
+    if (persistToNVS) {
+        saveSetpointsNVS();
+    }
 
-    Serial.printf("[setpoints] Atualizados: Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d\n",
-                 lux, tMin, tMax, uMin, uMax, coSp, co2Sp, tvocsSp);
+    Serial.printf("[setpoints] Atualizados: Lux=%d, Temp=[%.1f-%.1f], Hum=[%.1f-%.1f], CO=%d, CO2=%d, TVOCs=%d%s\n",
+                 lux, tMin, tMax, uMin, uMax, coSp, co2Sp, tvocsSp,
+                 persistToNVS ? " (salvo NVS)" : " (nao salvo — defaults temporarios)");
 }
 
 // =============================================================================

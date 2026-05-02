@@ -27,7 +27,8 @@ public:
     void setFirebaseHandler(FirebaseHandler* handler);
     void applySetpoints(int lux, float tempMin, float tempMax,
                         float humidityMin, float humidityMax,
-                        int coSetpoint, int co2Setpoint, int tvocsSetpoint);
+                        int coSetpoint, int co2Setpoint, int tvocsSetpoint,
+                        bool persistToNVS = true);
 
     void controlLEDs(bool on, int intensity);
     void controlRelay(uint8_t relayNumber, bool state);

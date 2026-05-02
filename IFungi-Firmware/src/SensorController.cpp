@@ -274,10 +274,10 @@ void SensorController::update() {
             float hComp = (dhtOK && !isnan(humidity))    ? humidity    : 50.0f;
             co = mq7PpmFromAdc(mqAdc, tComp, hComp, dhtOK);
         }
-
-        int waterSensorValue = analogRead(WATERLEVEL_PIN);
-        waterLevel = (waterSensorValue > WATER_LEVEL_THRESHOLD);
-
+    //------------------- temporariamente desabilitado (estufa sem o sensor ) -------------------
+       int waterSensorValue = analogRead(WATERLEVEL_PIN);
+    //    waterLevel = (waterSensorValue > WATER_LEVEL_THRESHOLD);
+        waterLevel = true; // ← desabilitado para estufas sem sensor de nível de água
         if (readCount % 5 == 0) {
             float voltage = (waterSensorValue / 4095.0) * 3.3;
             Serial.printf("[sensor] Água: %d (%1.2fV) -> %s\n",
