@@ -348,9 +348,25 @@ void setupSensorsAndActuators() {
     sensors.begin();
     actuators.begin(4, 23, 14, 18, 19, 13);
 
+    // BUG CORRIGIDO v1.2.1: quando loadSetpointsNVS() falha (namespace não existe
+    // ainda, ou flash recém-apagada), NÃO gravamos os defaults na NVS.
+    // Gravar defaults aqui causava o seguinte ciclo vicioso:
+    //   1. NVS vazia → loadSetpointsNVS() falha
+    //   2. applySetpoints(defaults) → saveSetpointsNVS() salva defaults na NVS
+    //   3. receiveSetpoints() lê Firebase (ex: tMax=23.0) e compara com statics
+    //      internos que também são defaults (tMax=30.0) → changed=true → aplica
+    //      E salva na NVS → OK neste boot
+    //   4. Porém: se o OTA reinicia com NVS válida, loadSetpointsNVS() CARREGA
+    //      os valores corretos (tMax=23.0). Aí receiveSetpoints() compara com
+    //      statics default (tMax=30.0) → changed=true → aplica Firebase → OK.
+    //   O real problema: applySetpoints com persistToNVS=false mantém valores
+    //   em RAM mas não contamina a NVS com defaults. Na próxima leitura do
+    //   Firebase, receiveSetpoints() sempre vai aplicar porque os statics
+    //   internos != Firebase, garantindo que os valores do usuário prevaleçam.
     if (!actuators.loadSetpointsNVS()) {
-        Serial.println("[init] Using default setpoints");
-        actuators.applySetpoints(5000, 20.0, 30.0, 60.0, 80.0, 50, 400, 100);
+        Serial.println("[init] NVS sem setpoints — usando defaults temporarios (Firebase prevalecera)");
+        actuators.applySetpoints(5000, 20.0f, 30.0f, 60.0f, 80.0f, 50, 400, 100,
+                                 false);  // ← persistToNVS=false: não contamina NVS
     }
 
     actuators.setFirebaseHandler(&firebase);

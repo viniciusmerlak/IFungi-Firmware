@@ -3,6 +3,8 @@
 #include <addons/TokenHelper.h>
 #include <addons/RTDBHelper.h>
 #include <ArduinoJson.h>   // necessário para desserializar registros NVS em sendLocalData
+#include <climits>         // INT_MIN — sentinela para statics de receiveSetpoints
+#include <cfloat>          // FLT_MAX — sentinela para statics de receiveSetpoints
 
 String FirebaseHandler::getMacAddress() {
     return ::getMacAddress();
@@ -1069,9 +1071,61 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
         return;
     }
 
-    static bool baselineReady = false;
-    static int   currentLux = 5000, currentCoSp = 50, currentCo2Sp = 400, currentTvocsSp = 100;
-    static float currentTMax = 30.0f, currentTMin = 20.0f, currentUMax = 80.0f, currentUMin = 60.0f;
+    // BUG CORRIGIDO v1.2.1: os statics abaixo representam "o que o ESP32 tem
+    // carregado agora" — não um snapshot de defaults do firmware.
+    //
+    // PROBLEMA ANTERIOR: statics eram inicializados com defaults hardcoded
+    // (5000, 20.0, 30.0...) independente do que estava na NVS ou no Firebase.
+    // Isso causava "changed=true" na primeira leitura pós-boot, o que era OK,
+    // MAS os statics nunca eram sincronizados com os valores da NVS carregados
+    // por loadSetpointsNVS(). Resultado: se o usuário tinha tMax=23 na NVS e
+    // no Firebase, o static dizia 30.0 → changed=true → applySetpoints(23) →
+    // correto. Parecia funcionar, mas havia o seguinte problema esporádico:
+    //
+    // PROBLEMA OTA: após reboot OTA, loadSetpointsNVS() carrega tMax=23 na RAM
+    // do actuator. Os statics aqui ficam em 30.0. receiveSetpoints() lê Firebase
+    // (tMax=23), compara com static 30.0 → changed=true → applySetpoints(23,
+    // persistToNVS=true) → salva 23 na NVS → correto.
+    //
+    // PORÉM: se a primeira leitura do Firebase logo após OTA falhar (timeout,
+    // SSL reset — comum porque a rede ainda está se estabilizando), fieldsRead<8
+    // → retorna sem aplicar → statics ficam em 30.0 → na próxima leitura (5s
+    // depois, rede estável), tMax=23 do Firebase vs static 30.0 → changed=true
+    // → aplica 23 → CORRETO. Mas se nesse intervalo o repairMissingFields() ou
+    // isGreenhouseStructureComplete() rodarem e detectarem "nó /setpoints OK",
+    // nada é sobrescrito. Até aqui tudo bem.
+    //
+    // O BUG REAL estava em MainController::setupSensorsAndActuators():
+    // quando loadSetpointsNVS() falhava (namespace não existia pós-erase), era
+    // chamado applySetpoints(defaults, persistToNVS=true) que:
+    //   1. Gravava defaults na NVS
+    //   2. Setava luxSetpoint=5000, tempMax=30.0... na RAM do actuator
+    // Então receiveSetpoints() via: Firebase=tMax23, static=30.0 → changed=true
+    // → applySetpoints(23, persist=true) → salva 23 → CORRETO neste boot.
+    // Mas a NVS já tinha sido "contaminada" com defaults antes de chegar aqui,
+    // e se o Firebase falhasse antes desta leitura, NVS ficava com defaults.
+    //
+    // SOLUÇÃO COMPLETA (coordenada entre os 3 arquivos):
+    //   1. loadSetpointsNVS: default lux=5000 (não 100)
+    //   2. MainController: applySetpoints(..., persistToNVS=false) quando usa defaults
+    //   3. receiveSetpoints (aqui): inicializa statics com SENTINELA impossível
+    //      para garantir que qualquer valor real do Firebase force changed=true
+    //      e seja persistido. Usa INT_MIN/FLT_MAX para garantir que a comparação
+    //      sempre detecte mudança na primeira leitura bem-sucedida.
+    //
+    // RESULTADO: Firebase é SEMPRE a fonte de verdade. NVS apenas acelera o boot
+    // (evita esperar a 1ª leitura Firebase). Se NVS e Firebase divergem, Firebase
+    // prevalece e atualiza a NVS na primeira leitura bem-sucedida.
+
+    static bool     baselineReady  = false;
+    static int      currentLux     = INT_MIN;   // ← sentinela: força changed=true
+    static int      currentCoSp    = INT_MIN;
+    static int      currentCo2Sp   = INT_MIN;
+    static int      currentTvocsSp = INT_MIN;
+    static float    currentTMax    = -FLT_MAX;  // ← sentinela: força changed=true
+    static float    currentTMin    = -FLT_MAX;
+    static float    currentUMax    = -FLT_MAX;
+    static float    currentUMin    = -FLT_MAX;
 
     if (!baselineReady) {
         if (fieldsRead < 8) {
@@ -1079,20 +1133,27 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
             return;
         }
         baselineReady = true;
+        Serial.println("[setpoints] Baseline estabelecido — Firebase e fonte de verdade");
     } else if (fieldsRead < 8) {
         Serial.printf("[setpoints] WARN: %d campo(s) ausentes - mantendo ultimo valor conhecido.\n", 8 - fieldsRead);
     }
 
-    int prevLux = currentLux, prevCoSp = currentCoSp, prevCo2Sp = currentCo2Sp, prevTvocsSp = currentTvocsSp;
-    float prevTMax = currentTMax, prevTMin = currentTMin, prevUMax = currentUMax, prevUMin = currentUMin;
+    int   prevLux     = currentLux;
+    int   prevCoSp    = currentCoSp;
+    int   prevCo2Sp   = currentCo2Sp;
+    int   prevTvocsSp = currentTvocsSp;
+    float prevTMax    = currentTMax;
+    float prevTMin    = currentTMin;
+    float prevUMax    = currentUMax;
+    float prevUMin    = currentUMin;
 
-    if (hasLux)     currentLux = parsedLux;
-    if (hasTMax)    currentTMax = parsedTMax;
-    if (hasTMin)    currentTMin = parsedTMin;
-    if (hasUMax)    currentUMax = parsedUMax;
-    if (hasUMin)    currentUMin = parsedUMin;
-    if (hasCoSp)    currentCoSp = parsedCoSp;
-    if (hasCo2Sp)   currentCo2Sp = parsedCo2Sp;
+    if (hasLux)     currentLux     = parsedLux;
+    if (hasTMax)    currentTMax    = parsedTMax;
+    if (hasTMin)    currentTMin    = parsedTMin;
+    if (hasUMax)    currentUMax    = parsedUMax;
+    if (hasUMin)    currentUMin    = parsedUMin;
+    if (hasCoSp)    currentCoSp    = parsedCoSp;
+    if (hasCo2Sp)   currentCo2Sp   = parsedCo2Sp;
     if (hasTvocsSp) currentTvocsSp = parsedTvocsSp;
 
     bool changed = false;
@@ -1114,9 +1175,11 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
                   fieldsRead, currentLux, currentTMin, currentTMax, currentUMin, currentUMax,
                   currentCoSp, currentCo2Sp, currentTvocsSp);
 
+    // persistToNVS=true: valores vêm do Firebase (fonte de verdade) → sempre gravar na NVS
     actuators.applySetpoints(currentLux, currentTMin, currentTMax,
                              currentUMin, currentUMax,
-                             currentCoSp, currentCo2Sp, currentTvocsSp);
+                             currentCoSp, currentCo2Sp, currentTvocsSp,
+                             true);  // ← persist=true: Firebase → NVS
 }
 
 bool FirebaseHandler::getDebugMode() {
