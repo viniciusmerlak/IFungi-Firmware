@@ -475,6 +475,22 @@ void setupWiFiAndFirebase() {
             firebaseAuthenticated = true;
             Serial.println("[firebase] Autenticacao bem-sucedida!");
 
+            // CORREÇÃO v1.2.3: aguarda 500 ms para que o contexto SSL do
+            // handshake de autenticação seja completamente desalocado do stack
+            // antes de abrir uma nova conexão SSL em verifyGreenhouse().
+            // Sem este yield, dois contextos TLS/RSA se sobrepõem no stack da
+            // loopTask, causando "Stack canary watchpoint triggered" mesmo com
+            // o stack aumentado.
+            vTaskDelay(pdMS_TO_TICKS(500));
+
+            // Verifica/cria a estrutura da estufa no Firebase.
+            // DEVE ser chamado APÓS authenticate() retornar (stack SSL liberado).
+            firebase.verifyGreenhouse();
+            firebase.checkUserPermission(firebase.userUID, firebase.greenhouseId);
+
+            // Yield extra antes de iniciar mais operações Firebase encadeadas
+            vTaskDelay(pdMS_TO_TICKS(200));
+
             firebase.ensureOTANodeExists();
             firebase.ensureLEDScheduleExists(actuators);
             firebase.ensureOperationModeExists(actuators);
