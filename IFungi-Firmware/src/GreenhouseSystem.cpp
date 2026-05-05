@@ -41,6 +41,13 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
 
     Firebase.begin(&config, &auth);
 
+    // CORRECAO v1.3.4: limita o buffer de resposta do fbdo para evitar alocacao
+    // excessiva de heap que causa stall na conexao SSL em payloads grandes.
+    // setResponseSize(4096): trunca leituras > 4KB no fbdo compartilhado —
+    // suficiente para todos os nos que lemos (setpoints, atuadores, modo).
+    // Nos grandes (logs, historico) usam caminhos especificos e nao passam por fbdo.
+    fbdo.setResponseSize(4096);
+
     Serial.print("[firebase] Aguardando autenticação");
     unsigned long startTime = millis();
     const unsigned long TIMEOUT = 30000;
@@ -86,11 +93,11 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     return false;
 }
 
-void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, 
+bool FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, 
                                          bool ledsOn, int ledsWatts, bool humidifierOn) {
     if (!authenticated || !Firebase.ready()) {
         Serial.println("[firebase] ERRO - Não autenticado para atualizar atuadores");
-        return;
+        return false;
     }
 
     FirebaseJson json;
@@ -114,29 +121,73 @@ void FirebaseHandler::updateActuatorState(bool relay1, bool relay2, bool relay3,
     
     if (Firebase.updateNode(fbdo, path.c_str(), json)) {
         Serial.println("[firebase] Estados dos atuadores atualizados com sucesso");
+        return true;
     } else {
         Serial.println("[firebase] ERRO - Falha ao atualizar atuadores: " + fbdo.errorReason());
         RLOG_FMT(LOG_ERROR, "[firebase]", "Falha ao atualizar atuadores: %s", fbdo.errorReason().c_str());
+        return false;
     }
 }
 
 void FirebaseHandler::refreshTokenIfNeeded() {
-    if(!initialized || !authenticated) return;
-    
-    if(millis() - lastTokenRefresh > TOKEN_REFRESH_INTERVAL) {
-        Serial.println("Refreshing Firebase token...");
-        Firebase.refreshToken(&config);
+    if (!initialized || !authenticated) return;
+
+    // CORRECAO v1.3.4: intervalo reduzido de 30min para 20min (token expira em 1h).
+    // Em caso de falha, resetamos lastTokenRefresh para 0 para tentar novamente
+    // no proximo ciclo (30s) em vez de esperar outros 20min — era a causa do
+    // travamento periodico: token expirava, refresh falhava silenciosamente, sistema
+    // ficava 20min sem conseguir escrever no Firebase ate o proximo ciclo de refresh.
+    const unsigned long REFRESH_INTERVAL = 20UL * 60UL * 1000UL; // 20 minutos
+    if (millis() - lastTokenRefresh < REFRESH_INTERVAL) return;
+
+    Serial.println("[firebase] Renovando token...");
+    Firebase.refreshToken(&config);
+
+    // Aguarda ate 5s para o token ficar pronto
+    unsigned long t = millis();
+    while (!Firebase.ready() && millis() - t < 5000) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    if (Firebase.ready()) {
+        Serial.println("[firebase] Token renovado com sucesso");
         lastTokenRefresh = millis();
+    } else {
+        // Falhou — reseta o timestamp para tentar novamente no proximo ciclo (30s)
+        Serial.println("[firebase] WARN: Falha ao renovar token — nova tentativa em 30s");
+        RLOG_WARN("[firebase]", "Falha ao renovar token — nova tentativa em 30s");
+        lastTokenRefresh = 0; // forca retry no proximo verifyConnectionStatus
     }
 }
 
+bool FirebaseHandler::recoverFbdo() {
+    // Chamado quando fbdo entra em estado inválido (timed out em cascata).
+    // Fecha a conexão SSL existente e força reabertura na próxima operação.
+    Serial.println("[firebase] Recuperando fbdo após falha em cascata...");
+    fbdo.clear();
+    // CORRECAO v1.3.4: vTaskDelay em vez de delay() para nao bloquear o loop/RTOS
+    vTaskDelay(pdMS_TO_TICKS(300));
+    if (!Firebase.ready()) {
+        Serial.println("[firebase] Firebase.ready()=false apos recovery — renovando token");
+        Firebase.refreshToken(&config);
+        unsigned long t = millis();
+        while (!Firebase.ready() && millis() - t < 5000) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+    }
+    bool ok = Firebase.ready();
+    Serial.println(ok ? "[firebase] fbdo recuperado com sucesso" : "[firebase] fbdo ainda inválido — próximo ciclo tentará novamente");
+    return ok;
+}
+
 void FirebaseHandler::verifyGreenhouse() {
-    if(!authenticated) {
+    if (!authenticated) {
         Serial.println("User not authenticated. Check credentials.");
         return;
     }
-    delay(1000);
-    
+    // CORRECAO v1.3.4: vTaskDelay em vez de delay() — nao bloqueia o RTOS
+    vTaskDelay(pdMS_TO_TICKS(500));
+
     Serial.println("Checking greenhouse...");
     if(greenhouseExists(greenhouseId)) {
         Serial.println("Greenhouse found: " + greenhouseId);
@@ -201,24 +252,35 @@ unsigned long FirebaseHandler::getCurrentTimestamp() {
         timeClient.update();
         return timeClient.getEpochTime();
     } else {
-        // Fallback offline: usa millis() relativo sem tocar na NVS
-        // para evitar spam de erros NOT_FOUND quando NVS foi apagada.
+        // Fallback offline: reconstrói o tempo real usando o último timestamp
+        // gravado na NVS mais o tempo decorrido desde o boot (millis).
         static unsigned long millisOffsetCalc = 0;
-        static bool offsetLoaded = false;
+        static bool offsetLoaded   = false;
+        static bool prevNvsReady   = false;  // detecta transição false→true de nvsInitialized
 
-        if (!offsetLoaded && nvsInitialized) {
-            // Só tenta carregar o offset se a NVS foi inicializada com sucesso
+        // BUG CORRIGIDO v1.2.4: se getCurrentTimestamp() for chamado antes de
+        // initializeNVS() completar, offsetLoaded era setado true com
+        // millisOffsetCalc=0 e NUNCA mais carregava o valor real da NVS —
+        // o timestamp offline ficava sempre em millis()/1000 desde o boot.
+        // Correção: re-tenta o carregamento quando nvsInitialized transita de
+        // false → true, independente de offsetLoaded.
+        bool nvsJustReady = (nvsInitialized && !prevNvsReady);
+        prevNvsReady = nvsInitialized;
+
+        if ((!offsetLoaded || nvsJustReady) && nvsInitialized) {
             Preferences prefs;
             if (prefs.begin(NAMESPACE, true)) {
-                unsigned long saved = prefs.getULong("ultimo_timestamp", 0);
-                if (saved > 0) {
-                    millisOffsetCalc = saved - (millis() / 1000);
+                unsigned long saved = prefs.getULong("last_ts", 0);
+                if (saved > 1609459200UL) {
+                    // Só usa o offset se o timestamp é plausível (> 2021-01-01),
+                    // evitando offsets negativos enormes quando a NVS tem lixo.
+                    millisOffsetCalc = saved - (millis() / 1000UL);
                 }
                 prefs.end();
             }
             offsetLoaded = true;
         }
-        return (millis() / 1000) + millisOffsetCalc;
+        return (millis() / 1000UL) + millisOffsetCalc;
     }
 }
 
@@ -271,7 +333,12 @@ void FirebaseHandler::saveDataLocally(float temp, float humidity, int co2, int c
 
     prefs.putString(("reg_" + String(numRecords)).c_str(), record.c_str());
     prefs.putInt("num_registros", numRecords + 1);
-    prefs.putULong("ultimo_timestamp", timestamp);
+    // BUG CORRIGIDO v1.2.4: "ultimo_timestamp" tem 16 caracteres, acima do limite
+    // de 15 do ESP32 NVS. nvs_set_blob/nvs_set_i32 falha silenciosamente com
+    // KEY_TOO_LONG — a chave nunca era gravada, o offset offline ficava sempre 0
+    // e o timestamp retornado era apenas millis()/1000 desde o boot.
+    // Renomeada para "last_ts" (7 chars), dentro do limite.
+    prefs.putULong("last_ts", timestamp);
     
     prefs.end();
     Serial.printf("[nvs] Registro %d salvo localmente (%d bytes)\n", numRecords, record.length());
@@ -415,11 +482,11 @@ void FirebaseHandler::sendLocalData() {
     Serial.printf("[nvs] Envio concluído: %d enviados, %d restantes.\n", sent, newIndex);
 }
 
-void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel) {
+bool FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel) {
     refreshTokenIfNeeded();
     if (!authenticated || !Firebase.ready()) {
         Serial.println("[firebase] ERRO - Não autenticado para enviar dados");
-        return;
+        return false;
     }
 
     // CORRECAO v1.3.1: NaN e invalido em JSON (RFC 8259).
@@ -447,14 +514,16 @@ void FirebaseHandler::sendSensorData(float temp, float humidity, int co2, int co
 
     if (Firebase.updateNode(fbdo, basePath.c_str(), json)) {
         Serial.println("[firebase] Dados dos sensores enviados com sucesso");
+        return true;
     } else {
         Serial.println("[firebase] ERRO - Falha ao enviar dados: " + fbdo.errorReason());
         RLOG_FMT(LOG_ERROR, "[firebase]", "Falha ao enviar dados dos sensores: %s", fbdo.errorReason().c_str());
+        return false;
     }
 }
 
-void FirebaseHandler::updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, bool ldrOk, bool waterOk) {
-    if (!authenticated || !Firebase.ready()) return;
+bool FirebaseHandler::updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, bool ldrOk, bool waterOk) {
+    if (!authenticated || !Firebase.ready()) return false;
 
     static bool lastDht   = true, lastCcs  = true;
     static bool lastMq7   = false;
@@ -489,7 +558,9 @@ void FirebaseHandler::updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, boo
     if (!Firebase.updateNode(fbdo, path.c_str(), json)) {
         Serial.println("[firebase] erro ao atualizar sensor_status: " + fbdo.errorReason());
         RLOG_FMT(LOG_ERROR, "[firebase]", "Falha ao atualizar sensor_status: %s", fbdo.errorReason().c_str());
+        return false;
     }
+    return true;
 }
 
 bool FirebaseHandler::checkUserPermission(const String& userUID, const String& greenhouseID) {
@@ -617,19 +688,53 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     String savedMode = "manual";
 
     if (hadExistingData) {
-        // Le apenas led_schedule e operation_mode para sincronizar o scheduler local.
-        // Setpoints NAO sao lidos: o PATCH os deixa intocados no banco.
-        if (Firebase.getJSON(fbdo, path.c_str()) && fbdo.dataType() != "null") {
-            FirebaseJson *existing = fbdo.jsonObjectPtr();
-            FirebaseJsonData r;
-            if (existing->get(r, "led_schedule/scheduleEnabled")) savedSchedEnabled = r.boolValue;
-            if (existing->get(r, "led_schedule/solarSimEnabled")) savedSolarSim     = r.boolValue;
-            if (existing->get(r, "led_schedule/onHour"))          savedOnH          = r.intValue;
-            if (existing->get(r, "led_schedule/onMinute"))        savedOnM          = r.intValue;
-            if (existing->get(r, "led_schedule/offHour"))         savedOffH         = r.intValue;
-            if (existing->get(r, "led_schedule/offMinute"))       savedOffM         = r.intValue;
-            if (existing->get(r, "led_schedule/intensity"))       savedIntensity    = r.intValue;
-            if (existing->get(r, "operation_mode/mode"))          savedMode         = r.stringValue;
+        // BUG CORRIGIDO v1.2.3: antes era feito Firebase.getJSON(path) que lê
+        // o JSON completo da estufa (inclui logs/historico → pode ter centenas
+        // de KB). Quando o payload é grande, a leitura via SSL falha com
+        // "Incoming record is too large" ou timeout, hadExistingData ficava
+        // false mesmo a estufa existindo, e o setJSON abaixo sobrescrevia
+        // led_schedule com os defaults (scheduleEnabled=false, solarSimEnabled=false).
+        // Correção: lê led_schedule e operation_mode como nós separados e pequenos,
+        // que sempre cabem num único record TLS e nunca falham por tamanho.
+        FirebaseJsonData r;
+
+        // led_schedule (< 200 bytes no total)
+        if (Firebase.getJSON(fbdo, (path + "/led_schedule").c_str()) && fbdo.dataType() != "null") {
+            FirebaseJson* ls = fbdo.jsonObjectPtr();
+            if (ls->get(r, "scheduleEnabled")) savedSchedEnabled = r.boolValue;
+            if (ls->get(r, "solarSimEnabled")) savedSolarSim     = r.boolValue;
+            if (ls->get(r, "onHour"))          savedOnH          = r.intValue;
+            if (ls->get(r, "onMinute"))        savedOnM          = r.intValue;
+            if (ls->get(r, "offHour"))         savedOffH         = r.intValue;
+            if (ls->get(r, "offMinute"))       savedOffM         = r.intValue;
+            if (ls->get(r, "intensity"))       savedIntensity    = r.intValue;
+            Serial.printf("[firebase] led_schedule preservado: sched=%d solar=%d %02d:%02d-%02d:%02d int=%d\n",
+                          savedSchedEnabled, savedSolarSim, savedOnH, savedOnM, savedOffH, savedOffM, savedIntensity);
+        } else {
+            Serial.println("[firebase] WARN: led_schedule nao encontrado no Firebase — lendo da NVS");
+            // Lê diretamente da NVS (mesmo namespace do loadLEDScheduleNVS),
+            // sem depender do ActuatorController que não está no escopo aqui.
+            Preferences nvsLed;
+            if (nvsLed.begin("led_schedule", true)) {
+                savedSchedEnabled = nvsLed.getBool("schEn",  false);
+                savedSolarSim     = nvsLed.getBool("solEn",  false);
+                savedOnH          = nvsLed.getInt("onH",     6);
+                savedOnM          = nvsLed.getInt("onM",     0);
+                savedOffH         = nvsLed.getInt("offH",    20);
+                savedOffM         = nvsLed.getInt("offM",    0);
+                savedIntensity    = nvsLed.getInt("int",     255);
+                nvsLed.end();
+                Serial.printf("[firebase] led_schedule da NVS: sched=%d solar=%d %02d:%02d-%02d:%02d int=%d\n",
+                              savedSchedEnabled, savedSolarSim, savedOnH, savedOnM, savedOffH, savedOffM, savedIntensity);
+            } else {
+                Serial.println("[firebase] led_schedule: NVS indisponivel, usando defaults");
+                // Permanece com os defaults já inicializados nas variáveis acima
+            }
+        }
+
+        // operation_mode/mode (< 100 bytes)
+        if (Firebase.getString(fbdo, (path + "/operation_mode/mode").c_str()) && fbdo.dataType() != "null") {
+            savedMode = fbdo.stringData();
         }
     }
     // ────────────────────────────────────────────────────────────────────────
@@ -885,13 +990,15 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         needsUpdate = true;
     }
     if (!check("led_schedule/scheduleEnabled")) {
-        patch.set("led_schedule/scheduleEnabled", false);
-        patch.set("led_schedule/solarSimEnabled", false);
-        patch.set("led_schedule/onHour", 6);   patch.set("led_schedule/onMinute", 0);
-        patch.set("led_schedule/offHour", 20); patch.set("led_schedule/offMinute", 0);
-        patch.set("led_schedule/intensity", 255);
-        Serial.println("[repair] Campo ausente: led_schedule");
-        needsUpdate = true;
+        // BUG CORRIGIDO v1.2.3: repairMissingFields() não tem acesso ao ActuatorController,
+        // portanto não pode saber os valores corretos da NVS (solarSimEnabled, etc.).
+        // Gravar false aqui sobrescrevia a simulação solar configurada pelo usuário.
+        // A criação do nó /led_schedule com valores corretos é responsabilidade de
+        // ensureLEDScheduleExists(actuators), que é chamada no loop com os valores
+        // reais do ledScheduler (carregados da NVS). Aqui só registramos o warning.
+        Serial.println("[repair] WARN: led_schedule ausente — será criado por ensureLEDScheduleExists()");
+        // NÃO escreve defaults — evita sobrescrever configurações do usuário.
+        needsUpdate = false;  // garante que este bloco não force um updateNode desnecessário
     }
     if (!check("operation_mode/mode")) {
         patch.set("operation_mode/mode", "manual");
@@ -961,19 +1068,15 @@ bool FirebaseHandler::loadFirebaseCredentials(String& email, String& password) {
 }
 
 void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
-    if (!authenticated) {
-        Serial.println("User not authenticated. Cannot receive setpoints.");
-        return;
-    }
+    if (!authenticated || !Firebase.ready()) return;
 
-    String path = "/greenhouses/" + greenhouseId + "/setpoints";
-
-    if (!Firebase.getJSON(fbdo, path.c_str())) {
-        Serial.println("[setpoints] Erro ao ler setpoints: " + fbdo.errorReason());
-        return;
-    }
-
-    FirebaseJson*    json = fbdo.jsonObjectPtr();
+    // CORRECAO v1.3.4: leitura por campo individual (path absoluto) em vez de
+    // getJSON() no no /setpoints. O getJSON era vulneravel a truncamento do
+    // payload quando logs/historico tornavam o JSON grande — campos sumiam do
+    // parse sem erro visivel, fieldsRead ficava < 8 e o baseline nunca era
+    // estabelecido, fazendo os valores do usuario nunca prevalecerem sobre NVS.
+    // Leituras individuais sao imunes a truncamento e usam o mesmo fbdo sequencialmente.
+    String base = "/greenhouses/" + greenhouseId + "/setpoints/";
     FirebaseJsonData result;
 
     int fieldsRead = 0;
@@ -982,17 +1085,17 @@ void FirebaseHandler::receiveSetpoints(ActuatorController& actuators) {
     int   parsedLux = 0, parsedCoSp = 0, parsedCo2Sp = 0, parsedTvocsSp = 0;
     float parsedTMax = 0.0f, parsedTMin = 0.0f, parsedUMax = 0.0f, parsedUMin = 0.0f;
 
-    if (json->get(result, "lux"))     { parsedLux     = result.intValue;   hasLux = true; fieldsRead++; }
-    if (json->get(result, "tMax"))    { parsedTMax    = result.floatValue; hasTMax = true; fieldsRead++; }
-    if (json->get(result, "tMin"))    { parsedTMin    = result.floatValue; hasTMin = true; fieldsRead++; }
-    if (json->get(result, "uMax"))    { parsedUMax    = result.floatValue; hasUMax = true; fieldsRead++; }
-    if (json->get(result, "uMin"))    { parsedUMin    = result.floatValue; hasUMin = true; fieldsRead++; }
-    if (json->get(result, "coSp"))    { parsedCoSp    = result.intValue;   hasCoSp = true; fieldsRead++; }
-    if (json->get(result, "co2Sp"))   { parsedCo2Sp   = result.intValue;   hasCo2Sp = true; fieldsRead++; }
-    if (json->get(result, "tvocsSp")) { parsedTvocsSp = result.intValue;   hasTvocsSp = true; fieldsRead++; }
+    if (Firebase.getInt(fbdo,   (base+"lux").c_str()))     { parsedLux     = fbdo.intData();   hasLux     = true; fieldsRead++; }
+    if (Firebase.getFloat(fbdo, (base+"tMax").c_str()))    { parsedTMax    = fbdo.floatData(); hasTMax    = true; fieldsRead++; }
+    if (Firebase.getFloat(fbdo, (base+"tMin").c_str()))    { parsedTMin    = fbdo.floatData(); hasTMin    = true; fieldsRead++; }
+    if (Firebase.getFloat(fbdo, (base+"uMax").c_str()))    { parsedUMax    = fbdo.floatData(); hasUMax    = true; fieldsRead++; }
+    if (Firebase.getFloat(fbdo, (base+"uMin").c_str()))    { parsedUMin    = fbdo.floatData(); hasUMin    = true; fieldsRead++; }
+    if (Firebase.getInt(fbdo,   (base+"coSp").c_str()))    { parsedCoSp    = fbdo.intData();   hasCoSp    = true; fieldsRead++; }
+    if (Firebase.getInt(fbdo,   (base+"co2Sp").c_str()))   { parsedCo2Sp   = fbdo.intData();   hasCo2Sp   = true; fieldsRead++; }
+    if (Firebase.getInt(fbdo,   (base+"tvocsSp").c_str())) { parsedTvocsSp = fbdo.intData();   hasTvocsSp = true; fieldsRead++; }
 
     if (fieldsRead == 0) {
-        Serial.println("[setpoints] WARN: Nenhum campo encontrado no no /setpoints.");
+        Serial.println("[setpoints] WARN: Nenhum campo encontrado em /setpoints.");
         return;
     }
 
@@ -1446,7 +1549,11 @@ void FirebaseHandler::initLogger(LogLevel minLevel) {
         Serial.println("[rlog] initLogger chamado antes de autenticar — ignorado");
         return;
     }
-    RemoteLogger::init(&fbdo, greenhouseId, minLevel);
+    // CORRECAO v1.3.3: RemoteLogger usa logFbdo dedicado, separado do fbdo principal.
+    // Compartilhar fbdo causava "response payload read timed out" em cascata:
+    // flush() chamado a cada 10ms colidia com sendSensorData/updateActuatorState
+    // que usam o mesmo fbdo, corrompendo o estado interno do FirebaseData.
+    RemoteLogger::init(&logFbdo, greenhouseId, minLevel);
     ensureLogNodeExists();
     RLOG_INFO("[system]", "Logger remoto inicializado");
 }

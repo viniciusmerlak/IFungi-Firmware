@@ -27,23 +27,25 @@ public:
 
     bool initializeNVS();
     bool authenticate(const String& email, const String& password);
-    void updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsWatts, bool humidifierOn);
+    bool updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsWatts, bool humidifierOn);
     bool checkUserPermission(const String& userUID, const String& greenhouseID);
     void createInitialGreenhouse(const String& creatorUser, const String& currentUser);
     bool greenhouseExists(const String& greenhouseId);
     void verifyGreenhouse();
-    void sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel);
-    void updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, bool ldrOk, bool waterOk);
+    bool sendSensorData(float temp, float humidity, int co2, int co, int lux, int tvocs, bool waterLevel);
+    bool updateSensorHealth(bool dhtOk, bool ccsOk, bool mq7Ok, bool ldrOk, bool waterOk);
     void receiveSetpoints(ActuatorController& actuators);
     bool loadFirebaseCredentials(String& email, String& password);
     void refreshTokenIfNeeded();
+    bool recoverFbdo();   ///< Recupera fbdo após falha em cascata (timed out)
     String getFormattedDateTime();
     unsigned long getCurrentTimestamp();
     void saveDataLocally(float temp, float humidity, int co2, int co, int lux, int tvocs, unsigned long timestamp);
     void sendLocalData();
     bool isGreenhouseStructureComplete(const String& greenhouseId);
 
-    FirebaseData fbdo;
+    FirebaseData fbdo;       ///< FirebaseData principal — operações de dados
+    FirebaseData logFbdo;    ///< FirebaseData exclusivo do RemoteLogger — sem compartilhamento
     String greenhouseId;
     String userUID;
     bool authenticated = false;

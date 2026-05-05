@@ -635,7 +635,17 @@ void handleFirebase() {
     if (!firebase.isAuthenticated() || WiFi.status() != WL_CONNECTED) return;
 
     if (millis() - lastFirebaseUpdate > FIREBASE_UPDATE_INTERVAL) {
-        firebase.sendSensorData(
+        // CORRECAO v1.3.3: conta falhas consecutivas para detectar fbdo inválido.
+        // Quando 3 operações seguidas falham com timeout/connection error,
+        // chama recoverFbdo() para fechar e reabrir a conexão SSL.
+        static uint8_t consecutiveFails = 0;
+        static unsigned long lastRecovery = 0;
+        const uint8_t MAX_FAILS_BEFORE_RECOVERY = 3;
+        const unsigned long MIN_RECOVERY_INTERVAL = 30000; // no mínimo 30s entre recoveries
+
+        // Cada função retorna false em caso de falha — contabilizamos
+        bool ok = true;
+        ok &= firebase.sendSensorData(
             sensors.getTemperature(),
             sensors.getHumidity(),
             sensors.getCO2(),
@@ -644,14 +654,14 @@ void handleFirebase() {
             sensors.getTVOCs(),
             sensors.getWaterLevel()
         );
-        firebase.updateSensorHealth(
+        ok &= firebase.updateSensorHealth(
             sensors.isDHTHealthy(),
             sensors.isCCS811Healthy(),
             sensors.isMQ7Healthy(),
             sensors.isLDRHealthy(),
             sensors.isWaterLevelHealthy()
         );
-        firebase.updateActuatorState(
+        ok &= firebase.updateActuatorState(
             actuators.getRelayState(1),
             actuators.getRelayState(2),
             actuators.getRelayState(3),
@@ -660,8 +670,28 @@ void handleFirebase() {
             actuators.getLEDsWatts(),
             actuators.isHumidifierOn()
         );
-        firebase.receiveSetpoints(actuators);
-        firebase.receiveLEDSchedule(actuators);
+
+        if (ok) {
+            consecutiveFails = 0;
+        } else {
+            consecutiveFails++;
+            if (consecutiveFails >= MAX_FAILS_BEFORE_RECOVERY &&
+                millis() - lastRecovery > MIN_RECOVERY_INTERVAL) {
+                Serial.printf("[firebase] %d falhas consecutivas — iniciando recovery do fbdo\n", consecutiveFails);
+                firebase.recoverFbdo();
+                consecutiveFails = 0;
+                lastRecovery = millis();
+                lastFirebaseUpdate = millis(); // pula este ciclo
+                return;
+            }
+        }
+
+        // receiveSetpoints e receiveLEDSchedule só rodam se as escritas foram OK
+        // (evita usar fbdo inválido para leituras)
+        if (ok) {
+            firebase.receiveSetpoints(actuators);
+            firebase.receiveLEDSchedule(actuators);
+        }
 
         lastFirebaseUpdate = millis();
     }

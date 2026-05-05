@@ -386,39 +386,42 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
     }
 
     // ── UMIDIFICADOR ──────────────────────────────────────────────────────────
+    // BUG CORRIGIDO v1.2.3: humidifierOn e relay3State podiam divergir quando
+    // o modo mudava de manual→automático (setManualStates atualiza ambos, mas
+    // uma transição de modo sem passar por setManualStates deixava relay3State
+    // desincronizado). Usa relay3State como fonte de verdade (é o estado real
+    // do pino) e mantém humidifierOn sincronizado a partir dele.
+    humidifierOn = relay3State;  // garante sincronia antes de qualquer decisão
+
+    auto setHumidifier = [&](bool on, const char* reason) {
+        if (relay3State == on) return;  // já está no estado desejado — não re-aciona
+        if (reason) Serial.printf("[actuator] Umidificador %s: %s\n", on ? "LIGADO" : "DESLIGADO", reason);
+        controlRelay(3, on);
+        humidifierOn = on;
+    };
+
     if (!_humidifierAllowed) {
-        if (humidifierOn) {
-            controlRelay(3, false);
-            humidifierOn = false;
-        }
+        setHumidifier(false, "modo de operação desabilita umidificador");
+
     } else if (waterLevel) {
         // waterLevel=true → água BAIXA
-        if (humidifierOn) {
-            Serial.println("[safety] Nível de água baixo, desligando umidificador");
-            controlRelay(3, false);
-            humidifierOn = false;
-        }
+        setHumidifier(false, "nível de água baixo");
+
     } else if (!dhtHealthy || isnan(humidity)) {
-        // Sem leitura de umidade confiável, desliga umidificador (fail-safe)
-        if (humidifierOn) {
-            Serial.println("[safety] DHT inoperante — umidificador desligado por segurança");
-            controlRelay(3, false);
-            humidifierOn = false;
-        }
+        // Sem leitura de umidade confiável — fail-safe
+        setHumidifier(false, "DHT inoperante — sem leitura de umidade");
+
     } else {
         if (humidity < (humidityMin - HYSTERESIS_HUMIDITY)) {
-            if (!humidifierOn) {
-                Serial.printf("[actuator] Umidade baixa (%.1f < %.1f), ligando\n", humidity, humidityMin);
-                controlRelay(3, true);
-                humidifierOn = true;
-            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "umidade baixa %.1f < %.1f", humidity, humidityMin);
+            setHumidifier(true, buf);
         } else if (humidity > (humidityMax + HYSTERESIS_HUMIDITY)) {
-            if (humidifierOn) {
-                Serial.printf("[actuator] Umidade alta (%.1f > %.1f), desligando\n", humidity, humidityMax);
-                controlRelay(3, false);
-                humidifierOn = false;
-            }
+            char buf[64];
+            snprintf(buf, sizeof(buf), "umidade alta %.1f > %.1f", humidity, humidityMax);
+            setHumidifier(false, buf);
         }
+        // Dentro da faixa com histerese: mantém o estado atual (sem ação)
     }
 
     // ── LEDs ──────────────────────────────────────────────────────────────────
