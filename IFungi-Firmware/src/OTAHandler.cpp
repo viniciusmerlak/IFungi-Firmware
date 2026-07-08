@@ -76,7 +76,12 @@ void OTAHandler::begin(FirebaseHandler* firebaseHandler,
 void OTAHandler::handle() {
     if (WiFi.status() != WL_CONNECTED) return;
     if (_firebase == nullptr || !_firebase->isAuthenticated()) return;
-    if (isUpdating()) return;
+
+    // Download incremental — retorna a cada chunk para não bloquear o loop
+    if (_downloadActive) {
+        _downloadStep();
+        return;
+    }
 
     bool timeToCheck = (millis() - _lastCheck >= _checkInterval);
 
@@ -90,12 +95,10 @@ void OTAHandler::handle() {
         if (_checkForUpdate()) {
             Serial.printf("[ota] Nova versao disponivel: %s -> %s\n",
                           _currentVersion.c_str(), _pendingVersion.c_str());
-            Serial.println("[ota] Iniciando download...");
+            Serial.println("[ota] Iniciando download incremental...");
 
-            if (_downloadAndInstall(_pendingUrl)) {
-                // ESP.restart() chamado internamente — nunca chega aqui em sucesso
-            } else {
-                Serial.println("[ota] ERROR: Falha na instalacao. Sistema continua operando.");
+            if (!_downloadBegin(_pendingUrl)) {
+                Serial.println("[ota] ERROR: Falha ao iniciar download. Sistema continua operando.");
                 _reportResult(false);
                 _status = FAILED;
             }
@@ -171,131 +174,156 @@ bool OTAHandler::_checkForUpdate() {
 }
 
 // =============================================================================
-// DOWNLOAD E INSTALAÇÃO
+// DOWNLOAD E INSTALAÇÃO (incremental — não bloqueia o loop principal)
 // =============================================================================
 
-/**
- * @brief Faz o download via HTTPS e grava na partição OTA inativa
- *
- * @details Usa HTTPClient em modo stream para não precisar alocar o binário
- * inteiro na RAM. O Update.h recebe os bytes em blocos de 1KB e grava
- * diretamente na flash.
- *
- * Proteções implementadas:
- *  - Apenas URLs HTTPS são aceitas (verificado em _checkForUpdate)
- *  - Timeout de 30s no HTTP
- *  - Validação do Content-Length antes de iniciar
- *  - Verifica cabeçalho mágico do binário ESP32 (0xE9) via Update.h
- *  - Rollback automático pelo Update.h se a escrita falhar
- *
- * NOTA SOBRE client.setInsecure():
- *  Desativa verificação do certificado CA — garante criptografia TLS mas
- *  não autentica a identidade do servidor. Para autenticação completa,
- *  use client.setCACert(root_ca) com o certificado raiz do servidor.
- *  Em ambientes controlados (rede interna + URL conhecida), setInsecure()
- *  é aceitável. Em produção com URLs públicas, prefira setCACert().
- *
- * @param url URL HTTPS completa do arquivo .bin
- * @return true em caso de sucesso (seguido de reboot), false em falha
- */
-bool OTAHandler::_downloadAndInstall(const String& url) {
+bool OTAHandler::_downloadBegin(const String& url) {
+    _downloadAbort(nullptr);
+
     _status   = DOWNLOADING;
     _progress = 0;
+    _written  = 0;
 
-    HTTPClient http;
-    WiFiClientSecure client;
-
-    client.setInsecure(); // veja nota no header desta função
+    _otaClient.setInsecure();
 
     Serial.println("[ota] Conectando ao servidor...");
     Serial.println("[ota] URL: " + url.substring(0, 60) + (url.length() > 60 ? "..." : ""));
 
-    http.begin(client, url);
-    http.setTimeout(30000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    _http.begin(_otaClient, url);
+    _http.setTimeout(30000);
+    _http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-    int httpCode = http.GET();
+    int httpCode = _http.GET();
 
     if (httpCode != HTTP_CODE_OK) {
-        Serial.printf("[ota] ERROR HTTP: %d (%s)\n", httpCode, http.errorToString(httpCode).c_str());
-        http.end();
+        Serial.printf("[ota] ERROR HTTP: %d (%s)\n", httpCode, _http.errorToString(httpCode).c_str());
+        _downloadAbort("HTTP error");
         return false;
     }
 
-    int contentLength = http.getSize();
+    _contentLength = (size_t)_http.getSize();
 
-    if (contentLength <= 0) {
+    if (_contentLength == 0) {
         Serial.println("[ota] ERROR: Content-Length invalido ou ausente.");
-        http.end();
+        _downloadAbort("invalid Content-Length");
         return false;
     }
 
-    Serial.printf("[ota] Tamanho do firmware: %d bytes (%.1f KB)\n",
-                  contentLength, contentLength / 1024.0f);
+    Serial.printf("[ota] Tamanho do firmware: %u bytes (%.1f KB)\n",
+                  (unsigned)_contentLength, _contentLength / 1024.0f);
 
-    if (!Update.begin(contentLength, U_FLASH)) {
+    if (!Update.begin(_contentLength, U_FLASH)) {
         Serial.printf("[ota] ERROR ao iniciar Update: ");
         Update.printError(Serial);
-        http.end();
+        _downloadAbort("Update.begin failed");
         return false;
     }
 
     Update.onProgress(_onProgress);
-
     _status = WRITING;
+    _streamWaitStart = millis();
+    _downloadActive  = true;
 
-    WiFiClient* stream = http.getStreamPtr();
-    const size_t BUFFER_SIZE = 1024;
-    uint8_t buffer[BUFFER_SIZE];
-    size_t written = 0;
+    Serial.println("[ota] Gravando firmware na flash (incremental)...");
+    return true;
+}
 
-    Serial.println("[ota] Gravando firmware na flash...");
+void OTAHandler::_downloadStep() {
+    if (!_downloadActive) return;
 
-    while (http.connected() && written < (size_t)contentLength) {
-        unsigned long waitStart = millis();
-        while (stream->available() == 0) {
-            if (millis() - waitStart > 5000) {
-                Serial.println("[ota] ERROR: Timeout aguardando dados do stream.");
-                Update.abort();
-                http.end();
-                return false;
-            }
-            delay(1);
+    WiFiClient* stream = _http.getStreamPtr();
+    if (stream == nullptr) {
+        _downloadAbort("stream null");
+        _reportResult(false);
+        _status = FAILED;
+        return;
+    }
+
+    size_t budget = OTA_CHUNK_BYTES;
+
+    while (budget > 0 && _written < _contentLength) {
+        if (!_http.connected() && _written < _contentLength) {
+            _downloadAbort("connection lost");
+            _reportResult(false);
+            _status = FAILED;
+            return;
         }
 
-        size_t bytesRead = stream->readBytes(buffer,
-                           min(BUFFER_SIZE, (size_t)(contentLength - written)));
+        if (stream->available() == 0) {
+            if (millis() - _streamWaitStart > OTA_STREAM_TIMEOUT_MS) {
+                Serial.println("[ota] ERROR: Timeout aguardando dados do stream.");
+                _downloadAbort("stream timeout");
+                _reportResult(false);
+                _status = FAILED;
+                return;
+            }
+            return; // volta no próximo loop() — sensores/atuadores continuam
+        }
 
-        if (bytesRead == 0) continue;
+        _streamWaitStart = millis();
 
-        size_t bytesWritten = Update.write(buffer, bytesRead);
+        size_t toRead = min(budget, _contentLength - _written);
+        size_t bytesRead = stream->readBytes(_downloadBuffer, toRead);
+
+        if (bytesRead == 0) {
+            return;
+        }
+
+        size_t bytesWritten = Update.write(_downloadBuffer, bytesRead);
 
         if (bytesWritten != bytesRead) {
             Serial.printf("[ota] ERROR de escrita: leu %u, escreveu %u bytes.\n",
-                          bytesRead, bytesWritten);
-            Update.abort();
-            http.end();
-            return false;
+                          (unsigned)bytesRead, (unsigned)bytesWritten);
+            _downloadAbort("flash write error");
+            _reportResult(false);
+            _status = FAILED;
+            return;
         }
 
-        written += bytesWritten;
+        _written += bytesWritten;
+        budget   -= bytesRead;
     }
 
-    http.end();
+    if (_written >= _contentLength) {
+        _downloadFinish();
+    }
+}
+
+void OTAHandler::_downloadAbort(const char* reason) {
+    if (reason != nullptr) {
+        Serial.printf("[ota] Download abortado: %s\n", reason);
+    }
+    if (Update.isRunning()) {
+        Update.abort();
+    }
+    _http.end();
+    _downloadActive  = false;
+    _contentLength   = 0;
+    _written         = 0;
+    _streamWaitStart = 0;
+}
+
+void OTAHandler::_downloadFinish() {
+    _http.end();
+    _downloadActive = false;
 
     if (!Update.end(true)) {
         Serial.print("[ota] ERROR na finalizacao: ");
         Update.printError(Serial);
-        return false;
+        _reportResult(false);
+        _status = FAILED;
+        return;
     }
 
     if (!Update.isFinished()) {
         Serial.println("[ota] ERROR: Update nao foi concluido corretamente.");
-        return false;
+        _reportResult(false);
+        _status = FAILED;
+        return;
     }
 
     Serial.println("\n[ota] Firmware gravado com sucesso");
-    Serial.printf("[ota] %u bytes escritos de %d\n", written, contentLength);
+    Serial.printf("[ota] %u bytes escritos de %u\n", (unsigned)_written, (unsigned)_contentLength);
 
     _status = SUCCESS;
     _reportResult(true);
@@ -303,8 +331,6 @@ bool OTAHandler::_downloadAndInstall(const String& url) {
     Serial.println("[ota] Reiniciando em 3 segundos...");
     delay(3000);
     ESP.restart();
-
-    return true; // Nunca alcançado
 }
 
 // =============================================================================

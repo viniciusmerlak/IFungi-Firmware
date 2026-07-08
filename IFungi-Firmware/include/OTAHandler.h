@@ -5,6 +5,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 
 /**
  * @file OTAHandler.h
@@ -82,12 +83,8 @@ public:
      * @brief Deve ser chamado no loop() principal
      *
      * @details Executa verificações periódicas e, quando necessário,
-     * inicia o processo de download e instalação. Não bloqueia o loop
-     * exceto durante a fase de gravação na flash (~10-30s).
-     *
-     * @note Durante o download/escrita, os sensores continuam operando
-     * pois o ESP32 tem dois cores. A escrita OTA usa o core de
-     * background e apenas bloqueia brevemente para cada bloco.
+     * inicia o download/instalação de forma incremental (~4 KB por chamada).
+     * Não bloqueia sensores, atuadores nem Firebase no loop principal.
      */
     void handle();
 
@@ -102,9 +99,11 @@ public:
     String getCurrentVersion() const { return _currentVersion; }
     String getPendingVersion() const { return _pendingVersion; }
     int getProgress() const { return _progress; }
-    bool isUpdating() const { return _status == DOWNLOADING || _status == WRITING; }
+    bool isUpdating() const { return _downloadActive; }
 
 private:
+    static const size_t OTA_CHUNK_BYTES = 4096;
+    static const unsigned long OTA_STREAM_TIMEOUT_MS = 5000;
     FirebaseHandler* _firebase = nullptr;
     String _greenhouseId;
     String _currentVersion;
@@ -124,12 +123,10 @@ private:
      */
     bool _checkForUpdate();
 
-    /**
-     * @brief Realiza o download e escrita do firmware
-     * @param url URL HTTPS do arquivo .bin
-     * @return true se download e escrita foram bem-sucedidos
-     */
-    bool _downloadAndInstall(const String& url);
+    bool _downloadBegin(const String& url);
+    void _downloadStep();
+    void _downloadAbort(const char* reason);
+    void _downloadFinish();
 
     /**
      * @brief Reporta o resultado da atualização de volta ao Firebase
@@ -146,6 +143,14 @@ private:
 
     // Ponteiro estático para o callback ter acesso à instância
     static OTAHandler* _instance;
+
+    bool            _downloadActive = false;
+    HTTPClient      _http;
+    WiFiClientSecure _otaClient;
+    size_t          _contentLength  = 0;
+    size_t          _written        = 0;
+    unsigned long   _streamWaitStart = 0;
+    uint8_t         _downloadBuffer[OTA_CHUNK_BYTES];
 };
 
 #endif // OTA_HANDLER_H

@@ -47,6 +47,15 @@ bool FirebaseHandler::authenticate(const String& email, const String& password) 
     // suficiente para todos os nos que lemos (setpoints, atuadores, modo).
     // Nos grandes (logs, historico) usam caminhos especificos e nao passam por fbdo.
     fbdo.setResponseSize(4096);
+    logFbdo.setResponseSize(1024);
+
+    // Estabilidade de longa duracao: limita buffers SSL e tempo de leitura nos
+    // dois FirebaseData. Sem isso, uma conexao ruim pode prender a loopTask por
+    // muito tempo ou pressionar o heap em sessoes de varias horas.
+    fbdo.setBSSLBufferSize(4096, 1024);
+    logFbdo.setBSSLBufferSize(2048, 512);
+    Firebase.setReadTimeout(fbdo, 10000);
+    Firebase.setReadTimeout(logFbdo, 10000);
 
     Serial.print("[firebase] Aguardando autenticação");
     unsigned long startTime = millis();

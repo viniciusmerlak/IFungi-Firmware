@@ -273,6 +273,17 @@ void ActuatorController::applyOperationMode(OperationMode mode) {
     _peltierAllowed    = p.peltierEnabled;
     _exhaustForced     = p.exhaustForcedOn;
 
+    // Presets ambientais do modo (RAM only — NVS/Firebase permanecem intactos)
+    if (mode != MODE_MANUAL) {
+        applySetpoints(p.luxSetpoint, p.tempMin, p.tempMax,
+                       p.humidityMin, p.humidityMax,
+                       coSetpoint, p.co2Setpoint, tvocsSetpoint,
+                       false);
+        Serial.printf("[mode] Setpoints do preset: T=[%.1f-%.1f] H=[%.1f-%.1f] CO2=%d Lux=%d\n",
+                      p.tempMin, p.tempMax, p.humidityMin, p.humidityMax,
+                      p.co2Setpoint, p.luxSetpoint);
+    }
+
     if (!p.ledsEnabled) {
         ledScheduler.scheduleEnabled = false;
         ledScheduler.solarSimEnabled = false;

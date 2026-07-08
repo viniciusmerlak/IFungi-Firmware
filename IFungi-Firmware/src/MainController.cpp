@@ -39,6 +39,11 @@
 #include "RemoteLogger.h"
 #include <WiFiManager.h>
 #include <Preferences.h>
+#include <cstdint>
+#include <cstdarg>
+#include <cstring>
+#include <esp_attr.h>
+#include <esp_system.h>
 
 #ifndef IFUNGI_WIFI_AP_NAME
     #error "IFUNGI_WIFI_AP_NAME nao definida. Verifique seu arquivo .env"
@@ -75,6 +80,9 @@ const unsigned long WIFI_RECONNECT_INTERVAL = 30000;
 // (lifeSupportTask no core 0 vs handleSensors no loop no core 1)
 SemaphoreHandle_t sensorMutex = nullptr;
 
+// Mutex para serializar controle de atuadores na transição lifeSupport ↔ loop
+SemaphoreHandle_t actuatorMutex = nullptr;
+
 // =============================================================================
 // TEMPORIZAÇÃO
 // =============================================================================
@@ -87,12 +95,18 @@ unsigned long lastHistoryUpdate      = 0;
 unsigned long lastLocalSave          = 0;
 unsigned long lastRepairCheck        = 0;
 unsigned long lastOperationModeCheck = 0;
+unsigned long lastSensorHealthUpdate = 0;
+unsigned long lastSetpointSync       = 0;
+unsigned long lastLEDScheduleSync    = 0;
 
 const unsigned long REPAIR_CHECK_INTERVAL        = 300000;
 const unsigned long OPERATION_MODE_CHECK_INTERVAL = 5000;
 const unsigned long SENSOR_READ_INTERVAL          = 2000;
 const unsigned long ACTUATOR_CONTROL_INTERVAL     = 5000;
 const unsigned long FIREBASE_UPDATE_INTERVAL      = 5000;
+const unsigned long SENSOR_HEALTH_INTERVAL        = 30000;
+const unsigned long SETPOINT_SYNC_INTERVAL        = 30000;
+const unsigned long LED_SCHEDULE_SYNC_INTERVAL    = 30000;
 const unsigned long HEARTBEAT_INTERVAL            = 30000;
 const unsigned long HISTORY_UPDATE_INTERVAL       = 300000;
 const unsigned long LOCAL_SAVE_INTERVAL           = 60000;
@@ -112,6 +126,106 @@ volatile bool lifeSupportTaskRunning = false;
 bool lastDebugMode   = false;
 unsigned long lastDebugCheck = 0;
 const unsigned long DEBUG_CHECK_INTERVAL = 2000;
+
+// =============================================================================
+// DIAGNOSTICO DE TRAVAMENTOS
+// =============================================================================
+
+RTC_DATA_ATTR char rtcLastStage[32] = "cold_boot";
+RTC_DATA_ATTR uint32_t rtcBootCount = 0;
+
+unsigned long lastHealthReport = 0;
+unsigned long maxLoopDuration = 0;
+uint32_t minFreeHeap = UINT32_MAX;
+uint32_t minMaxAllocHeap = UINT32_MAX;
+
+const unsigned long HEALTH_REPORT_INTERVAL = 60000;
+const unsigned long SLOW_HANDLER_WARN_MS = 3000;
+const unsigned long SLOW_LOOP_WARN_MS = 5000;
+
+const char* resetReasonLabel(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT";
+        case ESP_RST_SW:        return "SW";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
+}
+
+void setRuntimeStage(const char* stage) {
+    strncpy(rtcLastStage, stage, sizeof(rtcLastStage) - 1);
+    rtcLastStage[sizeof(rtcLastStage) - 1] = '\0';
+}
+
+static void diagLogInfo(const char* fmt, ...) {
+    char message[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    Serial.print("[diag] ");
+    Serial.println(message);
+
+    if (firebase.isAuthenticated() && firebase.isFirebaseReady()) {
+        RLOG_FMT(LOG_INFO, "[diag]", "%s", message);
+    }
+}
+
+static void diagLogWarn(const char* fmt, ...) {
+    char message[256];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(message, sizeof(message), fmt, args);
+    va_end(args);
+
+    Serial.print("[diag] ");
+    Serial.println(message);
+
+    if (firebase.isAuthenticated() && firebase.isFirebaseReady()) {
+        RLOG_FMT(LOG_WARN, "[diag]", "%s", message);
+    }
+}
+
+void reportRuntimeHealth(const char* reason) {
+    uint32_t freeHeap = ESP.getFreeHeap();
+    uint32_t maxAlloc = ESP.getMaxAllocHeap();
+    uint32_t loopStack = uxTaskGetStackHighWaterMark(NULL);
+    uint32_t lifeStack = lifeSupportTaskHandle ? uxTaskGetStackHighWaterMark(lifeSupportTaskHandle) : 0;
+
+    if (freeHeap < minFreeHeap) minFreeHeap = freeHeap;
+    if (maxAlloc < minMaxAllocHeap) minMaxAllocHeap = maxAlloc;
+
+    diagLogInfo("%s | up=%lus | heap=%u min=%u maxAlloc=%u minMaxAlloc=%u | stack loop=%u life=%u | maxLoop=%lums | stage=%s",
+                reason,
+                millis() / 1000UL,
+                freeHeap,
+                minFreeHeap,
+                maxAlloc,
+                minMaxAllocHeap,
+                loopStack,
+                lifeStack,
+                maxLoopDuration,
+                rtcLastStage);
+}
+
+void runTimedHandler(const char* name, void (*handler)()) {
+    setRuntimeStage(name);
+    unsigned long start = millis();
+    handler();
+    unsigned long elapsed = millis() - start;
+
+    if (elapsed > SLOW_HANDLER_WARN_MS) {
+        diagLogWarn("Handler lento: %s levou %lums", name, elapsed);
+    }
+}
 
 // =============================================================================
 // TAREFA DE SUPORTE DE VIDA (DURANTE PORTAL CAPTIVO / OFFLINE)
@@ -151,19 +265,26 @@ void lifeSupportTask(void* parameter) {
         }
 
         if (now - lastActTs > ACTUATOR_CONTROL_INTERVAL) {
-            actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
-            actuators.controlAutomatically(
-                sensors.getTemperature(),
-                sensors.getHumidity(),
-                sensors.getLight(),
-                sensors.getCO(),
-                sensors.getCO2(),
-                sensors.getTVOCs(),
-                sensors.getWaterLevel(),
-                sensors.isDHTHealthy(),
-                false   // allowFirebaseWrite=false: Firebase (TLS/lwip) não pode ser
-                        // chamado de uma FreeRTOS task fora da loopTask (pthread TLS inválido)
-            );
+            // Re-verifica a flag antes de agir — evita corrida na transição para o loop
+            if (lifeSupportTaskRunning &&
+                xSemaphoreTake(actuatorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                if (lifeSupportTaskRunning) {
+                    actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
+                    actuators.controlAutomatically(
+                        sensors.getTemperature(),
+                        sensors.getHumidity(),
+                        sensors.getLight(),
+                        sensors.getCO(),
+                        sensors.getCO2(),
+                        sensors.getTVOCs(),
+                        sensors.getWaterLevel(),
+                        sensors.isDHTHealthy(),
+                        false   // allowFirebaseWrite=false: Firebase (TLS/lwip) não pode ser
+                                // chamado de uma FreeRTOS task fora da loopTask (pthread TLS inválido)
+                    );
+                }
+                xSemaphoreGive(actuatorMutex);
+            }
             lastActTs = now;
         }
 
@@ -610,19 +731,22 @@ void handleSensors() {
 
 void handleActuators() {
     if (millis() - lastActuatorControl > ACTUATOR_CONTROL_INTERVAL) {
-        actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
+        if (xSemaphoreTake(actuatorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
 
-        actuators.controlAutomatically(
-            sensors.getTemperature(),
-            sensors.getHumidity(),
-            sensors.getLight(),
-            sensors.getCO(),
-            sensors.getCO2(),
-            sensors.getTVOCs(),
-            sensors.getWaterLevel(),
-            sensors.isDHTHealthy()   // ← CORREÇÃO: bloqueia Peltier se DHT falhou
-        );
+            actuators.controlAutomatically(
+                sensors.getTemperature(),
+                sensors.getHumidity(),
+                sensors.getLight(),
+                sensors.getCO(),
+                sensors.getCO2(),
+                sensors.getTVOCs(),
+                sensors.getWaterLevel(),
+                sensors.isDHTHealthy()   // ← CORREÇÃO: bloqueia Peltier se DHT falhou
+            );
 
+            xSemaphoreGive(actuatorMutex);
+        }
         lastActuatorControl = millis();
     }
 }
@@ -654,13 +778,16 @@ void handleFirebase() {
             sensors.getTVOCs(),
             sensors.getWaterLevel()
         );
-        ok &= firebase.updateSensorHealth(
-            sensors.isDHTHealthy(),
-            sensors.isCCS811Healthy(),
-            sensors.isMQ7Healthy(),
-            sensors.isLDRHealthy(),
-            sensors.isWaterLevelHealthy()
-        );
+        if (millis() - lastSensorHealthUpdate > SENSOR_HEALTH_INTERVAL) {
+            ok &= firebase.updateSensorHealth(
+                sensors.isDHTHealthy(),
+                sensors.isCCS811Healthy(),
+                sensors.isMQ7Healthy(),
+                sensors.isLDRHealthy(),
+                sensors.isWaterLevelHealthy()
+            );
+            lastSensorHealthUpdate = millis();
+        }
         ok &= firebase.updateActuatorState(
             actuators.getRelayState(1),
             actuators.getRelayState(2),
@@ -689,8 +816,14 @@ void handleFirebase() {
         // receiveSetpoints e receiveLEDSchedule só rodam se as escritas foram OK
         // (evita usar fbdo inválido para leituras)
         if (ok) {
-            firebase.receiveSetpoints(actuators);
-            firebase.receiveLEDSchedule(actuators);
+            if (millis() - lastSetpointSync > SETPOINT_SYNC_INTERVAL) {
+                firebase.receiveSetpoints(actuators);
+                lastSetpointSync = millis();
+            }
+            if (millis() - lastLEDScheduleSync > LED_SCHEDULE_SYNC_INTERVAL) {
+                firebase.receiveLEDSchedule(actuators);
+                lastLEDScheduleSync = millis();
+            }
         }
 
         lastFirebaseUpdate = millis();
@@ -727,6 +860,10 @@ void handleOperationMode() {
             RLOG_FMT(LOG_INFO, "[mode]", "Modo alterado: %s -> %s",
                      operationModeLabel(prevMode).c_str(),
                      operationModeLabel(newMode).c_str());
+            // Manual: restaura setpoints cacheados da NVS (valores do Firebase)
+            if (newMode == MODE_MANUAL) {
+                actuators.loadSetpointsNVS();
+            }
         }
     }
 }
@@ -752,11 +889,22 @@ void setup() {
     delay(1000);
 
     Serial.println("\n\n[system] Iniciando Sistema IFungi Greenhouse v" + FIRMWARE_VERSION);
+    rtcBootCount++;
+    diagLogInfo("Boot #%u | reset=%s | ultimo estagio antes do reset: %s",
+                rtcBootCount,
+                resetReasonLabel(esp_reset_reason()),
+                rtcLastStage);
+    setRuntimeStage("setup");
 
-    // Mutex deve ser criado antes de qualquer tarefa que use sensores
+    // Mutex deve ser criado antes de qualquer tarefa que use sensores/atuadores
     sensorMutex = xSemaphoreCreateMutex();
     if (sensorMutex == nullptr) {
         Serial.println("[FATAL] Falha ao criar sensorMutex — sistema pode travar!");
+    }
+
+    actuatorMutex = xSemaphoreCreateMutex();
+    if (actuatorMutex == nullptr) {
+        Serial.println("[FATAL] Falha ao criar actuatorMutex — corrida de atuadores possivel!");
     }
 
     setupLEDTask();
@@ -815,23 +963,39 @@ void setup() {
 // =============================================================================
 
 void loop() {
+    unsigned long loopStart = millis();
     // BUG CORRIGIDO: só chama handlers de sensor/atuador se a task NÃO está rodando.
     // Quando lifeSupportTaskRunning=true, a task cuida disso no core 0.
     if (!lifeSupportTaskRunning) {
-        handleSensors();
-        handleActuators();
-        handleFirebase();
-        handleHistoryAndLocalData();
-        handleDebugAndCalibration();
-        handleOperationMode();
-        handleRepairAndOTA();
-        verifyConnectionStatus();
+        runTimedHandler("handleSensors", handleSensors);
+        runTimedHandler("handleActuators", handleActuators);
+        runTimedHandler("handleFirebase", handleFirebase);
+        runTimedHandler("handleHistoryAndLocalData", handleHistoryAndLocalData);
+        runTimedHandler("handleDebugAndCalibration", handleDebugAndCalibration);
+        runTimedHandler("handleOperationMode", handleOperationMode);
+        runTimedHandler("handleRepairAndOTA", handleRepairAndOTA);
+        runTimedHandler("verifyConnectionStatus", verifyConnectionStatus);
+        setRuntimeStage("otaHandler.handle");
         otaHandler.handle();
     }
 
     // Reconexão sempre ativa, independente do modo
-    handleWiFiReconnection();
+    runTimedHandler("handleWiFiReconnection", handleWiFiReconnection);
 
+    setRuntimeStage("RemoteLogger::flush");
     RemoteLogger::flush();
+
+    unsigned long loopElapsed = millis() - loopStart;
+    if (loopElapsed > maxLoopDuration) maxLoopDuration = loopElapsed;
+    if (loopElapsed > SLOW_LOOP_WARN_MS) {
+        diagLogWarn("Loop lento: %lums | stage=%s", loopElapsed, rtcLastStage);
+    }
+
+    if (millis() - lastHealthReport > HEALTH_REPORT_INTERVAL) {
+        lastHealthReport = millis();
+        reportRuntimeHealth("periodic");
+    }
+
+    setRuntimeStage("loop_idle");
     delay(10);
 }
