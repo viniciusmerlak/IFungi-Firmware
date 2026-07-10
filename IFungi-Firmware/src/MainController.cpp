@@ -98,6 +98,7 @@ unsigned long lastOperationModeCheck = 0;
 unsigned long lastSensorHealthUpdate = 0;
 unsigned long lastSetpointSync       = 0;
 unsigned long lastLEDScheduleSync    = 0;
+unsigned long lastExhaustScheduleSync = 0;
 
 const unsigned long REPAIR_CHECK_INTERVAL        = 300000;
 const unsigned long OPERATION_MODE_CHECK_INTERVAL = 5000;
@@ -107,6 +108,7 @@ const unsigned long FIREBASE_UPDATE_INTERVAL      = 5000;
 const unsigned long SENSOR_HEALTH_INTERVAL        = 30000;
 const unsigned long SETPOINT_SYNC_INTERVAL        = 30000;
 const unsigned long LED_SCHEDULE_SYNC_INTERVAL    = 30000;
+const unsigned long EXHAUST_SCHEDULE_SYNC_INTERVAL = 30000;
 const unsigned long HEARTBEAT_INTERVAL            = 30000;
 const unsigned long HISTORY_UPDATE_INTERVAL       = 300000;
 const unsigned long LOCAL_SAVE_INTERVAL           = 60000;
@@ -217,7 +219,9 @@ void reportRuntimeHealth(const char* reason) {
 }
 
 void runTimedHandler(const char* name, void (*handler)()) {
+
     setRuntimeStage(name);
+    
     unsigned long start = millis();
     handler();
     unsigned long elapsed = millis() - start;
@@ -270,6 +274,7 @@ void lifeSupportTask(void* parameter) {
                 xSemaphoreTake(actuatorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
                 if (lifeSupportTaskRunning) {
                     actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
+                    actuators.applyExhaustSchedule(firebase.getCurrentTimestamp());
                     actuators.controlAutomatically(
                         sensors.getTemperature(),
                         sensors.getHumidity(),
@@ -614,6 +619,7 @@ void setupWiFiAndFirebase() {
 
             firebase.ensureOTANodeExists();
             firebase.ensureLEDScheduleExists(actuators);
+            firebase.ensureExhaustScheduleExists(actuators);
             firebase.ensureOperationModeExists(actuators);
             firebase.initLogger(LOG_INFO);
             firebase.sendLocalData();
@@ -689,6 +695,7 @@ void sendDataToHistory() {
 
 void verifyConnectionStatus() {
     static unsigned long lastCheck = 0;
+    static unsigned long lastFlushAttempt = 0;
     static bool prevWifiUp = true;
 
     if (millis() - lastCheck > 30000) {
@@ -701,13 +708,28 @@ void verifyConnectionStatus() {
         } else {
             if (!prevWifiUp) {
                 Serial.println("[wifi] WiFi reconectado — enviando dados pendentes");
-                if (firebase.isAuthenticated()) firebase.sendLocalData();
             }
             if (firebase.isAuthenticated() && !Firebase.ready()) {
                 firebase.refreshTokenIfNeeded();
             }
         }
         prevWifiUp = up;
+    }
+
+    // CORRECAO: gatilho de flush não pode depender apenas da transição literal
+    // de WiFi (caiu->voltou). Se o WiFi permanecer conectado mas o Firebase
+    // ficar indisponível por um tempo (token expirado, fbdo travado), os dados
+    // salvos localmente nunca eram reenviados. Agora verificamos a cada ciclo
+    // se há registros pendentes E o Firebase está pronto/autenticado — isso
+    // cobre tanto a reconexão de WiFi quanto a recuperação do Firebase/token.
+    if (millis() - lastFlushAttempt > 30000) {
+        lastFlushAttempt = millis();
+        if (WiFi.status() == WL_CONNECTED && firebase.isAuthenticated() && Firebase.ready()) {
+            if (firebase.getPendingLocalDataCount() > 0) {
+                Serial.println("[nvs] Registros pendentes detectados — tentando reenvio");
+                firebase.sendLocalData();
+            }
+        }
     }
 }
 
@@ -733,6 +755,7 @@ void handleActuators() {
     if (millis() - lastActuatorControl > ACTUATOR_CONTROL_INTERVAL) {
         if (xSemaphoreTake(actuatorMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
             actuators.applyLEDSchedule(firebase.getCurrentTimestamp());
+            actuators.applyExhaustSchedule(firebase.getCurrentTimestamp());
 
             actuators.controlAutomatically(
                 sensors.getTemperature(),
@@ -824,6 +847,10 @@ void handleFirebase() {
                 firebase.receiveLEDSchedule(actuators);
                 lastLEDScheduleSync = millis();
             }
+            if (millis() - lastExhaustScheduleSync > EXHAUST_SCHEDULE_SYNC_INTERVAL) {
+                firebase.receiveExhaustSchedule(actuators);
+                lastExhaustScheduleSync = millis();
+            }
         }
 
         lastFirebaseUpdate = millis();
@@ -876,6 +903,7 @@ void handleRepairAndOTA() {
         firebase.repairMissingFields();
         firebase.ensureOTANodeExists();
         firebase.ensureLEDScheduleExists(actuators);
+        firebase.ensureExhaustScheduleExists(actuators);
         firebase.ensureOperationModeExists(actuators);
     }
 }

@@ -405,29 +405,41 @@ bool FirebaseHandler::initializeNVS() {
     return true;
 }
 
+int FirebaseHandler::getPendingLocalDataCount() {
+    if (!initializeNVS()) return 0;
+
+    Preferences prefs;
+    if (!prefs.begin(NAMESPACE, true)) return 0;
+
+    int numRecords = prefs.getInt("num_registros", 0);
+    prefs.end();
+    return numRecords;
+}
+
 void FirebaseHandler::sendLocalData() {
     if (!initializeNVS()) {
         Serial.println("Could not send local data - NVS not available");
         return;
     }
-    
+
+    // CORRECAO: antes eram feitos dois prefs.begin() sequenciais (um read-only
+    // para checar num_registros, outro em modo escrita para processar) — risco
+    // de falha silenciosa/inconsistência entre as duas aberturas da NVS.
+    // Agora uma única sessão de escrita é usada do início ao fim.
     Preferences prefs;
-    if (!prefs.begin(NAMESPACE, true)) {
-        Serial.println("Failed to open Preferences for reading");
-        return;
-    }
-    
-    int numRecords = prefs.getInt("num_registros", 0);
-    Serial.println("[nvs] Tentando enviar " + String(numRecords) + " registros locais");
-    prefs.end();
-
-    if (numRecords == 0) return;
-
     if (!prefs.begin(NAMESPACE, false)) {
         Serial.println("Failed to open Preferences for writing");
         return;
     }
-    
+
+    int numRecords = prefs.getInt("num_registros", 0);
+    Serial.println("[nvs] Tentando enviar " + String(numRecords) + " registros locais");
+
+    if (numRecords == 0) {
+        prefs.end();
+        return;
+    }
+
     int sent = 0;
     bool sentFlags[MAX_RECORDS] = {};
 
@@ -694,6 +706,8 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
 
     bool  savedSchedEnabled = false, savedSolarSim = false;
     int   savedOnH = 6, savedOnM = 0, savedOffH = 20, savedOffM = 0, savedIntensity = 255;
+    bool  savedExhSchedEnabled = false;
+    int   savedExhOnH = 6, savedExhOnM = 0, savedExhOffH = 20, savedExhOffM = 0;
     String savedMode = "manual";
 
     if (hadExistingData) {
@@ -724,7 +738,7 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
             // Lê diretamente da NVS (mesmo namespace do loadLEDScheduleNVS),
             // sem depender do ActuatorController que não está no escopo aqui.
             Preferences nvsLed;
-            if (nvsLed.begin("led_schedule", true)) {
+            if (nvsLed.begin("led-sched", true)) {
                 savedSchedEnabled = nvsLed.getBool("schEn",  false);
                 savedSolarSim     = nvsLed.getBool("solEn",  false);
                 savedOnH          = nvsLed.getInt("onH",     6);
@@ -744,6 +758,33 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
         // operation_mode/mode (< 100 bytes)
         if (Firebase.getString(fbdo, (path + "/operation_mode/mode").c_str()) && fbdo.dataType() != "null") {
             savedMode = fbdo.stringData();
+        }
+
+        // exhaust_schedule (< 100 bytes no total)
+        if (Firebase.getJSON(fbdo, (path + "/exhaust_schedule").c_str()) && fbdo.dataType() != "null") {
+            FirebaseJson* es = fbdo.jsonObjectPtr();
+            if (es->get(r, "scheduleEnabled")) savedExhSchedEnabled = r.boolValue;
+            if (es->get(r, "onHour"))          savedExhOnH          = r.intValue;
+            if (es->get(r, "onMinute"))        savedExhOnM          = r.intValue;
+            if (es->get(r, "offHour"))         savedExhOffH         = r.intValue;
+            if (es->get(r, "offMinute"))       savedExhOffM         = r.intValue;
+            Serial.printf("[firebase] exhaust_schedule preservado: sched=%d %02d:%02d-%02d:%02d\n",
+                          savedExhSchedEnabled, savedExhOnH, savedExhOnM, savedExhOffH, savedExhOffM);
+        } else {
+            Serial.println("[firebase] WARN: exhaust_schedule nao encontrado no Firebase — lendo da NVS");
+            Preferences nvsExh;
+            if (nvsExh.begin("exh-sched", true)) {
+                savedExhSchedEnabled = nvsExh.getBool("schEn", false);
+                savedExhOnH          = nvsExh.getInt("onH",  6);
+                savedExhOnM          = nvsExh.getInt("onM",  0);
+                savedExhOffH         = nvsExh.getInt("offH", 20);
+                savedExhOffM         = nvsExh.getInt("offM", 0);
+                nvsExh.end();
+                Serial.printf("[firebase] exhaust_schedule da NVS: sched=%d %02d:%02d-%02d:%02d\n",
+                              savedExhSchedEnabled, savedExhOnH, savedExhOnM, savedExhOffH, savedExhOffM);
+            } else {
+                Serial.println("[firebase] exhaust_schedule: NVS indisponivel, usando defaults");
+            }
         }
     }
     // ────────────────────────────────────────────────────────────────────────
@@ -831,6 +872,15 @@ void FirebaseHandler::createInitialGreenhouse(const String& creatorUser, const S
     ledSched.set("offMinute",       savedOffM);
     ledSched.set("intensity",       savedIntensity);
     json.set("led_schedule", ledSched);
+
+    // Usa exhaust_schedule preservado (ou defaults para estufa nova)
+    FirebaseJson exhSched;
+    exhSched.set("scheduleEnabled", savedExhSchedEnabled);
+    exhSched.set("onHour",          savedExhOnH);
+    exhSched.set("onMinute",        savedExhOnM);
+    exhSched.set("offHour",         savedExhOffH);
+    exhSched.set("offMinute",       savedExhOffM);
+    json.set("exhaust_schedule", exhSched);
 
     // Usa operation_mode preservado (ou default para estufa nova)
     FirebaseJson opMode;
@@ -1031,6 +1081,14 @@ bool FirebaseHandler::isGreenhouseStructureComplete(const String& greenhouseId) 
         patch.set("manual_actuators/leds/intensity", 0);
         patch.set("manual_actuators/umidificador", false);
         needsUpdate = true;
+    }
+
+    if (!check("exhaust_schedule/scheduleEnabled")) {
+        // Mesmo padrão do led_schedule: não gravamos defaults aqui, apenas
+        // registramos o aviso. A criação do nó com valores reais (carregados
+        // da NVS via ExhaustScheduler) é responsabilidade de
+        // ensureExhaustScheduleExists(actuators), chamada no loop.
+        Serial.println("[repair] WARN: exhaust_schedule ausente — será criado por ensureExhaustScheduleExists()");
     }
 
     if (needsUpdate) {
@@ -1367,6 +1425,56 @@ void FirebaseHandler::ensureLEDScheduleExists(ActuatorController& actuators) {
 }
 
 // =============================================================================
+// AGENDADOR DO EXAUSTOR
+// =============================================================================
+
+void FirebaseHandler::receiveExhaustSchedule(ActuatorController& actuators) {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/exhaust_schedule";
+    if (!Firebase.getJSON(fbdo, path.c_str())) {
+        Serial.println("[exhaust] Falha ao ler exhaust_schedule: " + fbdo.errorReason());
+        return;
+    }
+
+    FirebaseJson*    json   = fbdo.jsonObjectPtr();
+    FirebaseJsonData result;
+
+    if (json->get(result, "scheduleEnabled")) actuators.exhaustScheduler.scheduleEnabled = result.boolValue;
+    if (json->get(result, "onHour"))          actuators.exhaustScheduler.onHour          = result.intValue;
+    if (json->get(result, "onMinute"))        actuators.exhaustScheduler.onMinute        = result.intValue;
+    if (json->get(result, "offHour"))         actuators.exhaustScheduler.offHour         = result.intValue;
+    if (json->get(result, "offMinute"))       actuators.exhaustScheduler.offMinute       = result.intValue;
+}
+
+// exhaust_schedule — criação autônoma pelo ESP32
+void FirebaseHandler::ensureExhaustScheduleExists(ActuatorController& actuators) {
+    if (!authenticated || !Firebase.ready()) return;
+
+    String path = "/greenhouses/" + greenhouseId + "/exhaust_schedule";
+
+    if (Firebase.get(fbdo, (path + "/scheduleEnabled").c_str()) &&
+        fbdo.dataType() != "null") {
+        return;
+    }
+
+    Serial.println("[exhaust] Nó exhaust_schedule não encontrado, criando...");
+
+    FirebaseJson es;
+    es.set("scheduleEnabled", actuators.exhaustScheduler.scheduleEnabled);
+    es.set("onHour",          actuators.exhaustScheduler.onHour);
+    es.set("onMinute",        actuators.exhaustScheduler.onMinute);
+    es.set("offHour",         actuators.exhaustScheduler.offHour);
+    es.set("offMinute",       actuators.exhaustScheduler.offMinute);
+
+    if (Firebase.updateNode(fbdo, path.c_str(), es)) {
+        Serial.println("[exhaust] No exhaust_schedule criado pelo ESP32");
+    } else {
+        Serial.println("[exhaust] Falha ao criar exhaust_schedule: " + fbdo.errorReason());
+    }
+}
+
+// =============================================================================
 // MODOS DE OPERAÇÃO
 // =============================================================================
 
@@ -1531,6 +1639,16 @@ void FirebaseHandler::repairMissingFields() {
         patch.set("sensor_status", ss);
         dirty = true;
         Serial.println("[repair] WARN: Campo ausente: sensor_status");
+    }
+
+    if (!fieldExists("exhaust_schedule")) {
+        FirebaseJson es;
+        es.set("scheduleEnabled", false);
+        es.set("onHour", 6); es.set("onMinute", 0);
+        es.set("offHour", 20); es.set("offMinute", 0);
+        patch.set("exhaust_schedule", es);
+        dirty = true;
+        Serial.println("[repair] WARN: Campo ausente: exhaust_schedule");
     }
 
     if (dirty) {

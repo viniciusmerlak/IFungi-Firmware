@@ -203,6 +203,7 @@ void ActuatorController::begin(uint8_t pinLED, uint8_t pinRelay1, uint8_t pinRel
     );
 
     loadLEDScheduleNVS();
+    loadExhaustScheduleNVS();
     Serial.println("[init] ActuatorController initialized successfully");
 }
 
@@ -464,11 +465,19 @@ void ActuatorController::controlAutomatically(float temp, float humidity, int li
     }
 
     // ── EXAUSTOR ──────────────────────────────────────────────────────────────
-    if (_exhaustForced) {
-        myServo.write(openPosition);
-        controlRelay(4, true);
-    } else if (co > coSetpoint || co2 > co2Setpoint || tvocs > tvocsSetpoint) {
+    // Prioridade de segurança: gases acima do limite SEMPRE podem forçar o
+    // exaustor, independentemente do scheduler estar ativo ou não. O scheduler
+    // por horário e o modo forçado manual são política de conveniência — nunca
+    // devem impedir a resposta a uma condição de gás perigosa.
+    bool gasAlert = (co > coSetpoint || co2 > co2Setpoint || tvocs > tvocsSetpoint);
+    bool wantExhaustOpen = gasAlert || _exhaustForced ||
+                           (exhaustScheduler.isActive() && exhaustScheduler.wantsExhaustOn());
+
+    if (gasAlert) {
         Serial.printf("[actuator] Gases acima do limite (CO:%d CO2:%d TVOCs:%d)\n", co, co2, tvocs);
+    }
+
+    if (wantExhaustOpen) {
         myServo.write(openPosition);
         controlRelay(4, true);
     } else {
@@ -616,14 +625,11 @@ void ActuatorController::updateFirebaseState() {
     }
 }
 
+// CORRECAO: updateFirebaseStateImmediately() era uma cópia idêntica de
+// updateFirebaseState(). Mantido como alias fino para não quebrar os
+// pontos de chamada existentes, sem duplicar a lógica.
 void ActuatorController::updateFirebaseStateImmediately() {
-    if (firebaseHandler != nullptr && firebaseHandler->isAuthenticated() &&
-        firebaseHandler->isFirebaseReady() && canWriteToFirebase()) {
-        firebaseHandler->updateActuatorState(
-            relay1State, relay2State, relay3State, relay4State,
-            (currentLEDIntensity > 0), currentLEDIntensity, humidifierOn
-        );
-    }
+    updateFirebaseState();
 }
 
 // =============================================================================
@@ -902,4 +908,95 @@ void ActuatorController::persistLEDScheduleIfChanged() {
     lastIntensity       = ledScheduler.configIntensity;
 
     saveLEDScheduleNVS();
+}
+
+// =============================================================================
+// AGENDADOR DO EXAUSTOR
+// =============================================================================
+
+void ActuatorController::applyExhaustSchedule(unsigned long ts) {
+    exhaustScheduler.update(ts, debugMode);
+    persistExhaustScheduleIfChanged();
+    // Nota: o acionamento efetivo do relé/servo acontece em controlAutomatically(),
+    // que também avalia a prioridade de segurança de gases (ver bloco EXAUSTOR).
+}
+
+void ActuatorController::saveExhaustScheduleNVS() {
+    Preferences preferences;
+    // Namespace curto ("exh-sched", 9 chars) e chaves <= 15 chars — dentro do
+    // limite da NVS do ESP32 (mesmo padrão de "led-sched").
+    if (!preferences.begin("exh-sched", false)) {
+        Serial.println("[exhaust] Failed opening NVS to save exhaust_schedule");
+        return;
+    }
+
+    preferences.putBool("schEn", exhaustScheduler.scheduleEnabled);
+    preferences.putInt("onH",  exhaustScheduler.onHour);
+    preferences.putInt("onM",  exhaustScheduler.onMinute);
+    preferences.putInt("offH", exhaustScheduler.offHour);
+    preferences.putInt("offM", exhaustScheduler.offMinute);
+    preferences.putUInt("rev", millis());
+    preferences.end();
+}
+
+bool ActuatorController::loadExhaustScheduleNVS() {
+    Preferences preferences;
+    if (!preferences.begin("exh-sched", true)) {
+        return false;
+    }
+
+    if (!preferences.isKey("schEn")) {
+        preferences.end();
+        return false;
+    }
+
+    exhaustScheduler.scheduleEnabled = preferences.getBool("schEn", false);
+    exhaustScheduler.onHour          = preferences.getInt("onH",  6);
+    exhaustScheduler.onMinute        = preferences.getInt("onM",  0);
+    exhaustScheduler.offHour         = preferences.getInt("offH", 20);
+    exhaustScheduler.offMinute       = preferences.getInt("offM", 0);
+    preferences.end();
+
+    _loadedExhaustScheduleFromNvs = true;
+    Serial.printf("[exhaust] Restored exhaust_schedule from NVS (%s %02d:%02d-%02d:%02d)\n",
+                  exhaustScheduler.scheduleEnabled ? "on" : "off",
+                  exhaustScheduler.onHour, exhaustScheduler.onMinute,
+                  exhaustScheduler.offHour, exhaustScheduler.offMinute);
+    return true;
+}
+
+void ActuatorController::persistExhaustScheduleIfChanged() {
+    static bool lastScheduleEnabled = false;
+    static int  lastOnHour          = -1;
+    static int  lastOnMinute        = -1;
+    static int  lastOffHour         = -1;
+    static int  lastOffMinute       = -1;
+    static bool initialized         = false;
+
+    if (!initialized) {
+        initialized         = true;
+        lastScheduleEnabled = exhaustScheduler.scheduleEnabled;
+        lastOnHour          = exhaustScheduler.onHour;
+        lastOnMinute        = exhaustScheduler.onMinute;
+        lastOffHour          = exhaustScheduler.offHour;
+        lastOffMinute        = exhaustScheduler.offMinute;
+        if (_loadedExhaustScheduleFromNvs) return;
+    }
+
+    bool changed = false;
+    if (lastScheduleEnabled != exhaustScheduler.scheduleEnabled) changed = true;
+    if (lastOnHour          != exhaustScheduler.onHour)          changed = true;
+    if (lastOnMinute        != exhaustScheduler.onMinute)        changed = true;
+    if (lastOffHour         != exhaustScheduler.offHour)         changed = true;
+    if (lastOffMinute       != exhaustScheduler.offMinute)       changed = true;
+
+    if (!changed) return;
+
+    lastScheduleEnabled = exhaustScheduler.scheduleEnabled;
+    lastOnHour          = exhaustScheduler.onHour;
+    lastOnMinute        = exhaustScheduler.onMinute;
+    lastOffHour         = exhaustScheduler.offHour;
+    lastOffMinute       = exhaustScheduler.offMinute;
+
+    saveExhaustScheduleNVS();
 }

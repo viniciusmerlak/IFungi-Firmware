@@ -18,7 +18,6 @@ public:
     FirebaseHandler();
     ~FirebaseHandler();
 
-    Preferences preferences;
     WiFiUDP ntpUDP;
     NTPClient timeClient;
     const char* NAMESPACE = "sensor_data";
@@ -26,6 +25,7 @@ public:
     bool nvsInitialized = false;
 
     bool initializeNVS();
+    int  getPendingLocalDataCount();  ///< Nº de registros aguardando reenvio na NVS local
     bool authenticate(const String& email, const String& password);
     bool updateActuatorState(bool relay1, bool relay2, bool relay3, bool relay4, bool ledsOn, int ledsWatts, bool humidifierOn);
     bool checkUserPermission(const String& userUID, const String& greenhouseID);
@@ -81,6 +81,25 @@ public:
      * @param actuators Referência ao ActuatorController (lê o estado atual)
      */
     void ensureLEDScheduleExists(ActuatorController& actuators);
+
+    // ── Agendador do exaustor ────────────────────────────────────────────────
+
+    /**
+     * @brief Lê /exhaust_schedule do RTDB e aplica no actuator
+     * @details Chamado periodicamente para sincronizar a config do app.
+     */
+    void receiveExhaustSchedule(ActuatorController& actuators);
+
+    /**
+     * @brief Garante que o nó /exhaust_schedule existe no banco
+     *
+     * @details Gerado autonomamente pelo ESP32 na primeira execução.
+     * O app lê este nó para exibir e editar a configuração.
+     * Se o nó já existir, não sobrescreve.
+     *
+     * @param actuators Referência ao ActuatorController (lê o estado atual)
+     */
+    void ensureExhaustScheduleExists(ActuatorController& actuators);
 
     // ── Modos de operação ────────────────────────────────────────────────────
 

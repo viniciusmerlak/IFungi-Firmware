@@ -6,6 +6,7 @@
 #include <ESP32Servo.h>
 #include "LEDScheduler.h"
 #include "OperationMode.h"
+#include "exhaustScheduler.h"
 
 class FirebaseHandler;
 
@@ -84,12 +85,19 @@ public:
     bool loadLEDScheduleNVS();
     void persistLEDScheduleIfChanged();
 
+    ExhaustScheduler exhaustScheduler;
+    void applyExhaustSchedule(unsigned long ts);
+    void saveExhaustScheduleNVS();
+    bool loadExhaustScheduleNVS();
+    void persistExhaustScheduleIfChanged();
+
     void setDevModeSettings(bool analogRead, bool digitalWrite, int pin, bool pwm, int pwmValue);
     void handleDevMode();
 
 private:
     uint8_t _pinLED, _pinRelay1, _pinRelay2, _pinRelay3, _pinRelay4, _servoPin;
     Servo myServo;
+    
     FirebaseHandler* firebaseHandler = nullptr;
 
     OperationMode _currentMode = MODE_MANUAL;
@@ -142,6 +150,7 @@ private:
     bool lastDevModeState    = false;
     TaskHandle_t ledPwmTaskHandle = nullptr;
     bool _loadedScheduleFromNvs   = false;
+    bool _loadedExhaustScheduleFromNvs = false;
 
     bool _allowFirebaseUpdates = true;   // proteção contra chamadas multi‑thread
 
